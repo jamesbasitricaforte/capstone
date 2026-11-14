@@ -1,0 +1,804 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function emailVerified() {
+      return signedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isVendor(userId) {
+      return emailVerified()
+        && request.auth.uid == userId
+        && exists(/databases/$(database)/documents/users/$(userId))
+        && get(/databases/$(database)/documents/users/$(userId)).data.role
+          == 'Vendor';
+    }
+
+    function isBuyer(userId) {
+      return emailVerified()
+        && request.auth.uid == userId
+        && exists(/databases/$(database)/documents/users/$(userId))
+        && get(/databases/$(database)/documents/users/$(userId)).data.role
+          == 'Buyer';
+    }
+
+    function validHttpsUrl(value) {
+      return value is string && value.matches('https://.+');
+    }
+
+    function validOptionalCoordinates(data) {
+      return (
+          data.latitude == null
+          && data.longitude == null
+        )
+        || (
+          data.latitude is number
+          && data.latitude >= -90
+          && data.latitude <= 90
+          && data.longitude is number
+          && data.longitude >= -180
+          && data.longitude <= 180
+        );
+    }
+
+    function validOptionalListingImage(data) {
+      return (
+          !data.keys().hasAny(['image_bytes'])
+          || data.image_bytes == null
+          || (
+            data.image_bytes is bytes
+            && data.image_bytes.size() <= 716800
+          )
+        )
+        && (
+          !data.keys().hasAny(['image_chunk_count', 'image_size_bytes'])
+          || (
+            data.keys().hasAll(['image_chunk_count', 'image_size_bytes'])
+            && data.image_chunk_count is int
+            && data.image_chunk_count >= 0
+            && data.image_chunk_count <= 8
+            && data.image_size_bytes is int
+            && data.image_size_bytes >= 0
+            && data.image_size_bytes <= 5000000
+            && (
+              (
+                data.image_chunk_count == 0
+                && data.image_size_bytes == 0
+              )
+              || (
+                data.image_chunk_count > 0
+                && data.image_size_bytes
+                  > (data.image_chunk_count - 1) * 625000
+                && data.image_size_bytes
+                  <= data.image_chunk_count * 625000
+              )
+            )
+          )
+        );
+    }
+
+    function validImageChunkId(chunkId, index) {
+      return (chunkId == '0' && index == 0)
+        || (chunkId == '1' && index == 1)
+        || (chunkId == '2' && index == 2)
+        || (chunkId == '3' && index == 3)
+        || (chunkId == '4' && index == 4)
+        || (chunkId == '5' && index == 5)
+        || (chunkId == '6' && index == 6)
+        || (chunkId == '7' && index == 7);
+    }
+
+    function validListing(data, listingId, ownerId) {
+      return data.keys().hasAll([
+          'id',
+          'owner_uid',
+          'vendor_uid',
+          'vendor',
+          'vendor_initials',
+          'name',
+          'category',
+          'description',
+          'price',
+          'unit',
+          'quantity',
+          'availability',
+          'status',
+          'condition',
+          'location',
+          'image_url',
+          'image_urls',
+          'video_urls',
+          'latitude',
+          'longitude',
+          'posted_at',
+          'created_at',
+          'updated_at',
+          'just_posted'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'owner_uid',
+          'vendor_uid',
+          'owner_email',
+          'vendor',
+          'vendor_initials',
+          'name',
+          'category',
+          'description',
+          'price',
+          'unit',
+          'quantity',
+          'availability',
+          'status',
+          'condition',
+          'location',
+          'image_url',
+          'image_urls',
+          'image_bytes',
+          'image_chunk_count',
+          'image_size_bytes',
+          'video_urls',
+          'latitude',
+          'longitude',
+          'posted_at',
+          'created_at',
+          'updated_at',
+          'just_posted',
+          'last_inventory_transaction_id'
+        ])
+        && data.id == listingId
+        && data.owner_uid == ownerId
+        && data.vendor_uid == ownerId
+        && data.name is string
+        && data.name.size() > 0
+        && data.category in ['Fruits', 'Vegetables']
+        && data.description is string
+        && data.price is int
+        && data.price > 0
+        && data.unit is string
+        && data.quantity is string
+        && data.availability is bool
+        && data.status in ['active', 'sold_out']
+        && data.availability == (data.status == 'active')
+        && data.condition is string
+        && data.vendor is string
+        && data.vendor_initials is string
+        && (
+          !data.keys().hasAny(['owner_email'])
+          || data.owner_email is string
+        )
+        && data.location is string
+        && data.image_url is string
+        && data.image_urls is list
+        && data.video_urls is list
+        && data.posted_at is timestamp
+        && data.created_at is timestamp
+        && data.updated_at is timestamp
+        && data.just_posted is bool
+        && (
+          !data.keys().hasAny(['last_inventory_transaction_id'])
+          || data.last_inventory_transaction_id is string
+        )
+        && data.image_urls.size() <= 1
+        && data.video_urls.size() <= 10
+        && validOptionalListingImage(data)
+        && validOptionalCoordinates(data);
+    }
+
+    function validBuyerInventoryChange(listingId) {
+      let transactionId = request.resource.data.last_inventory_transaction_id;
+      let transactionPath = /databases/$(database)/documents/marketplace_transactions/$(transactionId);
+      let transactionData = getAfter(transactionPath).data;
+      let oldQuantity = int(resource.data.quantity);
+      let newQuantity = int(request.resource.data.quantity);
+      return isBuyer(request.auth.uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'quantity',
+          'availability',
+          'status',
+          'updated_at',
+          'last_inventory_transaction_id'
+        ])
+        && transactionId is string
+        && existsAfter(transactionPath)
+        && !exists(transactionPath)
+        && transactionData.buyer_uid == request.auth.uid
+        && transactionData.listing_id == listingId
+        && transactionData.kind in ['order', 'reservation']
+        && newQuantity == oldQuantity - transactionData.quantity
+        && newQuantity >= 0
+        && request.resource.data.availability == (newQuantity > 0)
+        && request.resource.data.status
+          == (newQuantity > 0 ? 'active' : 'sold_out')
+        && request.resource.data.updated_at == request.time;
+    }
+
+    function validReservationCancellation(
+      transactionId,
+      listingId,
+      buyerId,
+      reservationBefore,
+      reservationAfter,
+      listingBefore,
+      listingAfter
+    ) {
+      let oldQuantity = int(listingBefore.quantity);
+      let newQuantity = int(listingAfter.quantity);
+      return isBuyer(buyerId)
+        && reservationBefore.id == transactionId
+        && reservationBefore.buyer_uid == buyerId
+        && reservationBefore.listing_id == listingId
+        && reservationBefore.kind == 'reservation'
+        && reservationBefore.status == 'reserved'
+        && reservationBefore.quantity is int
+        && reservationBefore.quantity > 0
+        && reservationAfter.status == 'cancelled'
+        && reservationAfter.diff(reservationBefore).affectedKeys()
+          .hasOnly(['status'])
+        && listingAfter.last_inventory_transaction_id == transactionId
+        && listingAfter.diff(listingBefore).affectedKeys().hasOnly([
+          'quantity',
+          'availability',
+          'status',
+          'updated_at',
+          'last_inventory_transaction_id'
+        ])
+        && listingAfter.quantity is string
+        && newQuantity == oldQuantity + reservationBefore.quantity
+        && newQuantity >= 0
+        && listingAfter.availability == (newQuantity > 0)
+        && listingAfter.status == (newQuantity > 0 ? 'active' : 'sold_out')
+        && listingAfter.updated_at == request.time;
+    }
+
+    function validBuyerReservationRestock(listingId) {
+      let transactionId = request.resource.data.last_inventory_transaction_id;
+      let reservationPath = /databases/$(database)/documents/marketplace_transactions/$(transactionId);
+      let reservationBefore = get(reservationPath).data;
+      let reservationAfter = getAfter(reservationPath).data;
+      return transactionId is string
+        && exists(reservationPath)
+        && existsAfter(reservationPath)
+        && validReservationCancellation(
+          transactionId,
+          listingId,
+          request.auth.uid,
+          reservationBefore,
+          reservationAfter,
+          resource.data,
+          request.resource.data
+        );
+    }
+
+    function validBuyerReservationTransactionCancellation(
+      transactionId,
+      reservationBefore,
+      reservationAfter
+    ) {
+      let listingId = reservationBefore.listing_id;
+      let listingPath = /databases/$(database)/documents/listings/$(listingId);
+      let listingBefore = get(listingPath).data;
+      let listingAfter = getAfter(listingPath).data;
+      return listingId is string
+        && exists(listingPath)
+        && existsAfter(listingPath)
+        && validReservationCancellation(
+          transactionId,
+          listingId,
+          request.auth.uid,
+          reservationBefore,
+          reservationAfter,
+          listingBefore,
+          listingAfter
+        );
+    }
+
+    function validMarketplaceTransaction(transactionId) {
+      let listingPath = /databases/$(database)/documents/listings/$(request.resource.data.listing_id);
+      let listingBefore = get(listingPath).data;
+      let listingAfter = getAfter(listingPath).data;
+      let data = request.resource.data;
+      return isBuyer(request.auth.uid)
+        && data.keys().hasAll([
+          'id',
+          'kind',
+          'buyer_uid',
+          'buyer_email',
+          'vendor_uid',
+          'listing_id',
+          'listing',
+          'quantity',
+          'unit_price',
+          'total',
+          'status',
+          'buyer_hidden',
+          'created_at'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'kind',
+          'buyer_uid',
+          'buyer_email',
+          'vendor_uid',
+          'listing_id',
+          'listing',
+          'quantity',
+          'unit_price',
+          'total',
+          'status',
+          'buyer_hidden',
+          'created_at'
+        ])
+        && data.id == transactionId
+        && data.kind in ['order', 'reservation']
+        && data.buyer_uid == request.auth.uid
+        && data.buyer_email == request.auth.token.email
+        && data.listing_id is string
+        && exists(listingPath)
+        && listingBefore.status == 'active'
+        && listingBefore.availability == true
+        && listingBefore.vendor_uid == data.vendor_uid
+        && data.vendor_uid is string
+        && data.quantity is int
+        && data.quantity > 0
+        && data.unit_price is int
+        && data.unit_price == listingBefore.price
+        && data.total is int
+        && data.total > 0
+        && data.total == data.unit_price * data.quantity
+        && data.listing is map
+        && data.buyer_hidden == false
+        && data.created_at == request.time
+        && (
+          (data.kind == 'order'
+            && data.status == 'pending_vendor_confirmation')
+          || (data.kind == 'reservation' && data.status == 'reserved')
+        )
+        && listingAfter.last_inventory_transaction_id == transactionId
+        && int(listingBefore.quantity) - int(listingAfter.quantity)
+          == data.quantity;
+    }
+
+    function validVendorReview(reviewId) {
+      let data = request.resource.data;
+      let vendorPath = /databases/$(database)/documents/users/$(data.vendor_uid);
+      return isBuyer(request.auth.uid)
+        && data.keys().hasAll([
+          'id',
+          'vendor_uid',
+          'buyer_uid',
+          'buyer_name',
+          'buyer_photo_url',
+          'order_id',
+          'rating',
+          'comment',
+          'is_verified_purchase',
+          'created_at'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'vendor_uid',
+          'buyer_uid',
+          'buyer_name',
+          'buyer_photo_url',
+          'order_id',
+          'rating',
+          'comment',
+          'is_verified_purchase',
+          'created_at'
+        ])
+        && data.id == reviewId
+        && data.vendor_uid is string
+        && data.vendor_uid.size() > 0
+        && exists(vendorPath)
+        && get(vendorPath).data.role == 'Vendor'
+        && data.buyer_uid == request.auth.uid
+        && data.buyer_name is string
+        && (
+          data.buyer_photo_url == null
+          || validHttpsUrl(data.buyer_photo_url)
+        )
+        && data.rating is int
+        && data.rating >= 1
+        && data.rating <= 5
+        && data.comment is string
+        && data.comment.size() > 0
+        && data.comment.size() <= 500
+        && data.is_verified_purchase is bool
+        && data.created_at == request.time
+        && reviewId
+          == data.vendor_uid + '_' + request.auth.uid + '_'
+            + (data.order_id == null ? 'store' : data.order_id)
+        && (
+          (data.order_id == null && !data.is_verified_purchase)
+          || (
+            data.order_id is string
+            && data.is_verified_purchase
+            && exists(
+              /databases/$(database)/documents/marketplace_transactions/$(data.order_id)
+            )
+            && get(
+              /databases/$(database)/documents/marketplace_transactions/$(data.order_id)
+            ).data.kind == 'order'
+            && get(
+              /databases/$(database)/documents/marketplace_transactions/$(data.order_id)
+            ).data.buyer_uid == request.auth.uid
+            && get(
+              /databases/$(database)/documents/marketplace_transactions/$(data.order_id)
+            ).data.vendor_uid == data.vendor_uid
+            && get(
+              /databases/$(database)/documents/marketplace_transactions/$(data.order_id)
+            ).data.status == 'completed'
+          )
+        );
+    }
+
+    function validListingMedia(data) {
+      return (
+          data.image_url == ''
+          && data.image_urls.size() == 0
+        )
+        || (
+          validHttpsUrl(data.image_url)
+          && data.image_urls.size() == 1
+          && data.image_urls[0] == data.image_url
+        );
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasAll([
+          'role',
+          'email',
+          'full_name',
+          'company_name',
+          'company_description',
+          'address_line_1',
+          'zip_code',
+          'phone',
+          'tax_id',
+          'business_type',
+          'latitude',
+          'longitude',
+          'profile_photo_url',
+          'created_at'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'role',
+          'email',
+          'full_name',
+          'company_name',
+          'company_description',
+          'address_line_1',
+          'zip_code',
+          'phone',
+          'tax_id',
+          'business_type',
+          'latitude',
+          'longitude',
+          'profile_photo_url',
+          'created_at'
+        ])
+        && request.resource.data.role in ['Buyer', 'Vendor']
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.created_at is timestamp
+        && (
+          request.resource.data.role != 'Vendor'
+          || (
+            request.resource.data.latitude is number
+            && request.resource.data.longitude is number
+          )
+        )
+        && (
+          request.resource.data.profile_photo_url == null
+          || validHttpsUrl(request.resource.data.profile_photo_url)
+        )
+        && validOptionalCoordinates(request.resource.data);
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'full_name',
+          'company_name',
+          'company_description',
+          'address_line_1',
+          'zip_code',
+          'phone',
+          'tax_id',
+          'business_type',
+          'latitude',
+          'longitude',
+          'profile_photo_url',
+          'profile_photo_bytes',
+          'updated_at'
+        ])
+        && (
+          request.resource.data.profile_photo_url == null
+          || validHttpsUrl(request.resource.data.profile_photo_url)
+        )
+        && (
+          !request.resource.data.keys().hasAny(['profile_photo_bytes'])
+          || request.resource.data.profile_photo_bytes == null
+          || (
+            request.resource.data.profile_photo_bytes is bytes
+            && request.resource.data.profile_photo_bytes.size() <= 716800
+          )
+        )
+        && validOptionalCoordinates(request.resource.data)
+        && (
+          !request.resource.data.keys().hasAny(['updated_at'])
+          || request.resource.data.updated_at is timestamp
+        );
+      allow delete: if false;
+
+      match /cart/{listingId} {
+        function validCartItem() {
+          let listingPath = /databases/$(database)/documents/listings/$(listingId);
+          return request.resource.data.keys().hasAll([
+              'listing_id',
+              'quantity',
+              'updated_at'
+            ])
+            && request.resource.data.keys().hasOnly([
+              'listing_id',
+              'quantity',
+              'updated_at'
+            ])
+            && request.resource.data.listing_id == listingId
+            && request.resource.data.quantity is int
+            && request.resource.data.quantity > 0
+            && request.resource.data.updated_at == request.time
+            && exists(listingPath)
+            && get(listingPath).data.status == 'active'
+            && get(listingPath).data.availability == true
+            && request.resource.data.quantity
+              <= int(get(listingPath).data.quantity);
+        }
+
+        allow read, delete: if isBuyer(userId);
+        allow create: if isBuyer(userId) && validCartItem();
+        allow update: if isBuyer(userId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'quantity',
+            'updated_at'
+          ])
+          && validCartItem();
+      }
+    }
+
+    match /listings/{listingId} {
+      allow read: if true;
+      allow create: if isVendor(request.auth.uid)
+        && validListing(request.resource.data, listingId, request.auth.uid)
+        && !request.resource.data.keys().hasAny(['owner_email'])
+        && validListingMedia(request.resource.data);
+      allow update: if (
+        isVendor(request.auth.uid)
+        && resource.data.owner_uid == request.auth.uid
+        && resource.data.vendor_uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'price',
+          'quantity',
+          'availability',
+          'status',
+          'name',
+          'category',
+          'description',
+          'image_url',
+          'image_urls',
+          'image_bytes',
+          'image_chunk_count',
+          'image_size_bytes',
+          'just_posted',
+          'posted_at',
+          'updated_at',
+          'last_inventory_transaction_id'
+        ])
+        && validListing(request.resource.data, listingId, request.auth.uid)
+        && (
+          validListingMedia(request.resource.data)
+          || (
+            request.resource.data.image_url == resource.data.image_url
+            && request.resource.data.image_urls == resource.data.image_urls
+          )
+        )
+      ) || validBuyerInventoryChange(listingId)
+        || validBuyerReservationRestock(listingId);
+      allow delete: if isVendor(request.auth.uid)
+        && resource.data.owner_uid == request.auth.uid
+        && resource.data.vendor_uid == request.auth.uid;
+
+      match /image_chunks/{chunkId} {
+        allow read: if true;
+        allow create: if isVendor(request.auth.uid)
+          && request.resource.data.keys().hasAll(['index', 'bytes'])
+          && request.resource.data.keys().hasOnly(['index', 'bytes'])
+          && request.resource.data.index is int
+          && validImageChunkId(chunkId, request.resource.data.index)
+          && request.resource.data.bytes is bytes
+          && request.resource.data.bytes.size() > 0
+          && request.resource.data.bytes.size() <= 625000
+          && getAfter(
+            /databases/$(database)/documents/listings/$(listingId)
+          ).data.owner_uid == request.auth.uid
+          && request.resource.data.index
+            < getAfter(
+              /databases/$(database)/documents/listings/$(listingId)
+            ).data.image_chunk_count;
+        allow update: if false;
+        allow delete: if isVendor(request.auth.uid)
+          && get(
+            /databases/$(database)/documents/listings/$(listingId)
+          ).data.owner_uid == request.auth.uid;
+      }
+    }
+
+    match /marketplace_transactions/{transactionId} {
+      allow read: if emailVerified()
+        && (
+          resource.data.buyer_uid == request.auth.uid
+          || resource.data.vendor_uid == request.auth.uid
+        );
+      allow create: if validMarketplaceTransaction(transactionId);
+      allow update: if (
+          isVendor(resource.data.vendor_uid)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status'])
+          && (
+            (
+              resource.data.kind == 'order'
+              && resource.data.status == 'pending_vendor_confirmation'
+              && request.resource.data.status in ['approved', 'declined']
+            )
+            || (
+              resource.data.kind == 'order'
+              && resource.data.status == 'approved'
+              && request.resource.data.status == 'completed'
+            )
+          )
+        )
+        || (
+          isBuyer(resource.data.buyer_uid)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['buyer_hidden'])
+          && request.resource.data.buyer_hidden == true
+          && request.resource.data.status == resource.data.status
+        )
+        || (
+          validBuyerReservationTransactionCancellation(
+            transactionId,
+            resource.data,
+            request.resource.data
+          )
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status'])
+        );
+      allow delete: if false;
+    }
+
+    match /vendor_reviews/{reviewId} {
+      allow read: if true;
+      allow create: if validVendorReview(reviewId);
+      allow update, delete: if false;
+    }
+
+    match /vendor_locations/{vendorId} {
+      allow read: if true;
+      allow create, update: if isVendor(vendorId)
+        && request.resource.data.keys().hasAll([
+          'id',
+          'name',
+          'business_type',
+          'address',
+          'latitude',
+          'longitude',
+          'updated_at'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'name',
+          'business_type',
+          'address',
+          'latitude',
+          'longitude',
+          'updated_at'
+        ])
+        && request.resource.data.id == vendorId
+        && request.resource.data.name is string
+        && request.resource.data.address is string
+        && (
+          request.resource.data.business_type == null
+          || request.resource.data.business_type is string
+        )
+        && request.resource.data.latitude is number
+        && request.resource.data.latitude >= -90
+        && request.resource.data.latitude <= 90
+        && request.resource.data.longitude is number
+        && request.resource.data.longitude >= -180
+        && request.resource.data.longitude <= 180
+        && request.resource.data.updated_at is timestamp;
+      allow delete: if isVendor(vendorId);
+    }
+
+    match /vendor_public_profiles/{vendorId} {
+      allow read: if true;
+      allow create, update: if isVendor(vendorId)
+        && request.resource.data.keys().hasAll([
+          'id',
+          'store_name',
+          'owner_name',
+          'description',
+          'business_type',
+          'address',
+          'zip_code',
+          'phone',
+          'latitude',
+          'longitude',
+          'profile_photo_url',
+          'profile_photo_bytes',
+          'updated_at'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'store_name',
+          'owner_name',
+          'description',
+          'business_type',
+          'address',
+          'zip_code',
+          'phone',
+          'latitude',
+          'longitude',
+          'profile_photo_url',
+          'profile_photo_bytes',
+          'updated_at'
+        ])
+        && request.resource.data.id == vendorId
+        && request.resource.data.store_name is string
+        && (
+          request.resource.data.owner_name == null
+          || request.resource.data.owner_name is string
+        )
+        && (
+          request.resource.data.description == null
+          || request.resource.data.description is string
+        )
+        && (
+          request.resource.data.business_type == null
+          || request.resource.data.business_type is string
+        )
+        && (
+          request.resource.data.address == null
+          || request.resource.data.address is string
+        )
+        && (
+          request.resource.data.zip_code == null
+          || request.resource.data.zip_code is string
+        )
+        && (
+          request.resource.data.phone == null
+          || request.resource.data.phone is string
+        )
+        && (
+          request.resource.data.profile_photo_url == null
+          || validHttpsUrl(request.resource.data.profile_photo_url)
+        )
+        && (
+          request.resource.data.profile_photo_bytes == null
+          || (
+            request.resource.data.profile_photo_bytes is bytes
+            && request.resource.data.profile_photo_bytes.size() <= 716800
+          )
+        )
+        && validOptionalCoordinates(request.resource.data)
+        && request.resource.data.updated_at is timestamp;
+      allow delete: if isVendor(vendorId);
+    }
+  }
+}
