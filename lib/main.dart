@@ -199,10 +199,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   bool _isLoadingVendorOrders = false;
   bool _isLoadingMessages = false;
   bool _isUpdatingProfilePhoto = false;
-  bool _isSendingVerificationEmail = false;
-  bool _isRefreshingEmailVerification = false;
-  DateTime? _lastVerificationEmailRequestAt;
-  Timer? _verificationEmailCooldownTimer;
   Object? _loadError;
   Object? _nearbyError;
   Object? _vendorOrdersError;
@@ -309,7 +305,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _verificationEmailCooldownTimer?.cancel();
     _listingSubscription.cancel();
     _listingRemovalSubscription.cancel();
     _notificationSubscription.cancel();
@@ -691,96 +686,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     return creatingAccount
         ? _service.register(credentials)
         : _service.signIn(credentials);
-  }
-
-  bool get _verificationResendBlocked =>
-      !MarketplaceScreen.isVerificationEmailResendAllowed(
-        _lastVerificationEmailRequestAt,
-      );
-
-  String _verificationResendLabel() {
-    final lastRequestAt = _lastVerificationEmailRequestAt;
-    if (lastRequestAt == null) return 'Send verification email';
-    final remaining = MarketplaceScreen._verificationEmailCooldown -
-        DateTime.now().difference(lastRequestAt);
-    final secondsRemaining = remaining.inSeconds.clamp(1, 60);
-    return 'Wait ${secondsRemaining}s';
-  }
-
-  Future<void> _sendVerificationEmail() async {
-    if (_isSendingVerificationEmail || _verificationResendBlocked) {
-      return;
-    }
-    setState(() => _isSendingVerificationEmail = true);
-    _lastVerificationEmailRequestAt = DateTime.now();
-    _verificationEmailCooldownTimer?.cancel();
-    _verificationEmailCooldownTimer = Timer(
-      MarketplaceScreen._verificationEmailCooldown,
-      () {
-        if (!mounted) return;
-        setState(() {});
-      },
-    );
-    try {
-      await _service.sendEmailVerification();
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Verification email sent.')));
-    } on MarketplaceApiException {
-      if (!mounted) return;
-      return;
-    } finally {
-      if (mounted) setState(() => _isSendingVerificationEmail = false);
-    }
-  }
-
-  Future<void> _refreshEmailVerificationStatus({
-    bool showMessage = true,
-  }) async {
-    if (_isRefreshingEmailVerification) return;
-    setState(() => _isRefreshingEmailVerification = true);
-    try {
-      final account = await _service.refreshEmailVerificationStatus();
-      if (!mounted) return;
-      if (account == null) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Please sign in again.')));
-        return;
-      }
-      setState(() {
-        _signedInRole = account.role;
-        _signedInEmail = account.email;
-        _signedInUserId = account.id;
-        _signedInAccount = account;
-        _signedInVendorAccount = account.role == 'Vendor' ? account : null;
-      });
-      await _loadListings();
-      if (account.role == 'Buyer') {
-        await _loadBuyerData();
-      } else {
-        await _loadVendorVerificationStatus();
-        await _loadVendorOrders();
-      }
-      await _loadConversations();
-      if (mounted && showMessage) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Email verified. Marketplace access is enabled.'),
-          ),
-        );
-      }
-    } on MarketplaceApiException catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Could not refresh verification status: $error'),
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _isRefreshingEmailVerification = false);
-    }
   }
 
   Future<void> _loadBuyerData() async {
@@ -2691,133 +2596,6 @@ class _FilterDropdown<T> extends StatelessWidget {
       ),
     ),
   );
-}
-
-class _EmailVerificationPage extends StatelessWidget {
-  const _EmailVerificationPage({
-    required this.email,
-    required this.isSending,
-    required this.isRefreshing,
-    required this.isCooldownActive,
-    required this.resendLabel,
-    required this.onResend,
-    required this.onRefresh,
-    required this.onSignOut,
-  });
-
-  final String email;
-  final bool isSending;
-  final bool isRefreshing;
-  final bool isCooldownActive;
-  final String resendLabel;
-  final VoidCallback onResend;
-  final VoidCallback onRefresh;
-  final VoidCallback onSignOut;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: Card(
-            color: _paper,
-            elevation: 0,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-              side: const BorderSide(color: _line),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(28),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.mark_email_unread_outlined,
-                    color: _forest,
-                    size: 48,
-                  ),
-                  const SizedBox(height: 18),
-                  const Text(
-                    'Verify your email address',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: _deepForest,
-                      fontFamily: 'Georgia',
-                      fontSize: 24,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'We sent a verification link to $email. Verify your '
-                    'address and return here to unlock marketplace features.',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: _muted, height: 1.5),
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Email status: Not verified',
-                    style: TextStyle(
-                      color: _muted,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 22),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed:
-                          isSending || isRefreshing || isCooldownActive
-                          ? null
-                          : onResend,
-                      icon: isSending
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.send_outlined),
-                      label: Text(
-                        isSending
-                            ? 'Sending…'
-                            : isCooldownActive
-                            ? resendLabel
-                            : 'Send verification email',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  OutlinedButton.icon(
-                    onPressed: isRefreshing || isSending ? null : onRefresh,
-                    icon: isRefreshing
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.refresh),
-                    label: Text(
-                      isRefreshing ? 'Checking…' : 'I have verified my email',
-                    ),
-                  ),
-                  TextButton.icon(
-                    onPressed: onSignOut,
-                    icon: const Icon(Icons.logout),
-                    label: const Text('Sign out'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class _MarketplaceHeader extends StatelessWidget {

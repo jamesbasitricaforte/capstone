@@ -1588,10 +1588,5 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
     _ => error.message ?? 'Firebase Authentication failed (${error.code}).',
   };
 
-  String _verificationEmailErrorMessage(FirebaseAuthException error) =>
-      error.code == 'too-many-requests'
-      ? 'Firebase temporarily limited verification email requests to prevent '
-            'abuse. This Firebase-enforced limit may still apply when you use '
-            'a different email address. Please wait before trying again.'
-      : _authErrorMessage(error);
+
 }
