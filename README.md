@@ -50,9 +50,7 @@ Location lookup and map tiles use public online services and require an
 internet connection. The OpenStreetMap tile server has a usage policy; use an
 appropriate tile provider for production traffic.
 
-For Windows desktop, enable Windows Developer Mode so Flutter can create
-plugin symlinks. You can open the setting with
-`start ms-settings:developers`.
+This project is Android-only.
 
 ## Build and verification
 
