@@ -163,7 +163,7 @@ class FirebaseListingService {
     data.remove('owner_email');
     final chunkCount = data['image_chunk_count'];
     if (chunkCount != null &&
-        (chunkCount is! int ||
+        (chunkCount is! int ||  
             chunkCount < 0 ||
             chunkCount > maxFirestoreImageChunkCount)) {
       throw FormatException(
