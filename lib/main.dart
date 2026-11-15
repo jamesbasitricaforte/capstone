@@ -185,6 +185,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   final Set<String> _deletingBuyerOrderIds = {};
   List<ProduceOrder> _vendorOrders = [];
   List<MarketplaceConversation> _conversations = [];
+  final Set<String> _deletingConversationIds = {};
   late final StreamSubscription<ProduceListing> _listingSubscription;
   late final StreamSubscription<String> _listingRemovalSubscription;
   late final StreamSubscription<MarketplaceNotification>
@@ -795,7 +796,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         SnackBar(
           content: Text(
             cancelled
-                ? 'Reservation cancelled and stock restored.'
+                ? 'Reservation cancelled. Stock was restored if the listing is still available.'
                 : 'This reservation is no longer active.',
           ),
         ),
@@ -867,6 +868,49 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       ),
     );
     if (mounted) await _loadConversations();
+  }
+
+  Future<void> _deleteConversation(MarketplaceConversation conversation) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete conversation?'),
+        content: const Text(
+          'This removes the conversation from your inbox only. The other participant can still see it.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete conversation'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _deletingConversationIds.add(conversation.id));
+    try {
+      await _service.deleteConversationForMe(conversationId: conversation.id);
+      if (!mounted) return;
+      await _loadConversations();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Conversation deleted from your inbox.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not delete conversation: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _deletingConversationIds.remove(conversation.id));
+      }
+    }
   }
 
   Future<void> _changeProfilePhoto() async {
@@ -2066,6 +2110,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         onRefresh: _loadConversations,
         currentUserId: _signedInUserId ?? '',
         onOpenConversation: _openConversation,
+        onDeleteConversation: _deleteConversation,
+        deletingConversationIds: _deletingConversationIds,
       );
     }
     if (_section == _Section.cart) {
@@ -4773,7 +4819,6 @@ class _EditListingDialogState extends State<_EditListingDialog> {
   late final TextEditingController _priceController;
   late final TextEditingController _quantityController;
   late final TextEditingController _descriptionController;
-  late final TextEditingController _imageUrlController;
   late String _category;
   late bool _available;
 
@@ -4793,7 +4838,6 @@ class _EditListingDialogState extends State<_EditListingDialog> {
     _descriptionController = TextEditingController(
       text: widget.listing.description,
     );
-    _imageUrlController = TextEditingController(text: widget.listing.imageUrl);
     _category = widget.listing.category == 'Fruits' ? 'Fruits' : 'Vegetables';
     _available = quantity > 0;
   }
@@ -4804,7 +4848,6 @@ class _EditListingDialogState extends State<_EditListingDialog> {
     _priceController.dispose();
     _quantityController.dispose();
     _descriptionController.dispose();
-    _imageUrlController.dispose();
     super.dispose();
   }
 
@@ -4825,12 +4868,10 @@ class _EditListingDialogState extends State<_EditListingDialog> {
         vendorInitials: original.vendorInitials,
         location: original.location,
         distanceKm: original.distanceKm,
-        imageUrl: _imageUrlController.text.trim(),
+        imageUrl: original.imageUrl,
         ownerEmail: original.ownerEmail,
         ownerUid: original.ownerUid,
-        imageUrls: _imageUrlController.text.trim().isEmpty
-            ? const []
-            : [_imageUrlController.text.trim()],
+        imageUrls: original.imageUrls,
         videoUrls: original.videoUrls,
         latitude: original.latitude,
         longitude: original.longitude,
@@ -4850,21 +4891,6 @@ class _EditListingDialogState extends State<_EditListingDialog> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          TextFormField(
-            controller: _imageUrlController,
-            keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
-              labelText: 'Hosted product photo URL (optional)',
-              hintText: 'https://example.com/photo.jpg',
-              helperText: 'Use a publicly accessible HTTP or HTTPS image URL.',
-            ),
-            validator: (value) {
-              final url = value?.trim() ?? '';
-              return url.isNotEmpty && !isHostedMediaUrl(url)
-                  ? 'Enter a valid public HTTP or HTTPS URL.'
-                  : null;
-            },
-          ),
           const SizedBox(height: 12),
           TextFormField(
             controller: _nameController,
@@ -4970,7 +4996,6 @@ class _NewListingDialogState extends State<_NewListingDialog> {
   final _quantityController = TextEditingController();
   final _locationController = TextEditingController();
   final _descriptionController = TextEditingController();
-  final _hostedImageUrlController = TextEditingController();
   Uint8List? _imageBytes;
   String? _imageFileName;
   String? _formError;
@@ -4990,7 +5015,6 @@ class _NewListingDialogState extends State<_NewListingDialog> {
     _quantityController.dispose();
     _locationController.dispose();
     _descriptionController.dispose();
-    _hostedImageUrlController.dispose();
     super.dispose();
   }
 
@@ -5040,7 +5064,6 @@ class _NewListingDialogState extends State<_NewListingDialog> {
       return;
     }
     final name = _nameController.text.trim();
-    final hostedImageUrl = _hostedImageUrlController.text.trim();
     final id = 'listing-${DateTime.now().microsecondsSinceEpoch}';
     Navigator.of(context).pop(
       ProduceListing(
@@ -5061,10 +5084,10 @@ class _NewListingDialogState extends State<_NewListingDialog> {
             .join(),
         location: _locationController.text.trim(),
         ownerEmail: widget.vendorEmail,
-        imageUrl: hostedImageUrl,
+        imageUrl: '',
         imageBytes: _imageBytes,
         imageFileName: _imageFileName,
-        imageUrls: hostedImageUrl.isEmpty ? const [] : [hostedImageUrl],
+        imageUrls: const [],
         latitude: widget.vendorLatitude,
         longitude: widget.vendorLongitude,
         postedAt: DateTime.now(),
@@ -5154,25 +5177,6 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                     ),
                   ),
                 const SizedBox(height: 20),
-                _FormFieldLabel(
-                  label: 'Hosted product photo URL (optional)',
-                  child: TextFormField(
-                    controller: _hostedImageUrlController,
-                    keyboardType: TextInputType.url,
-                    decoration: const InputDecoration(
-                      hintText: 'https://example.com/photo.jpg',
-                      helperText:
-                          'Use a publicly accessible HTTP or HTTPS image URL.',
-                    ),
-                    validator: (value) {
-                      final url = value?.trim() ?? '';
-                      return url.isNotEmpty && !isHostedMediaUrl(url)
-                          ? 'Enter a valid public HTTP or HTTPS URL.'
-                          : null;
-                    },
-                  ),
-                ),
-                const SizedBox(height: 14),
                 _FormFieldLabel(
                   label: 'Produce name',
                   child: TextFormField(

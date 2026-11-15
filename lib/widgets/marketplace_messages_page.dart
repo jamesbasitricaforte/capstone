@@ -15,6 +15,8 @@ class MarketplaceMessagesPage extends StatelessWidget {
     required this.error,
     required this.onRefresh,
     required this.onOpenConversation,
+    required this.onDeleteConversation,
+    required this.deletingConversationIds,
     required this.currentUserId,
   });
 
@@ -23,6 +25,8 @@ class MarketplaceMessagesPage extends StatelessWidget {
   final Object? error;
   final VoidCallback onRefresh;
   final ValueChanged<MarketplaceConversation> onOpenConversation;
+  final Future<void> Function(MarketplaceConversation) onDeleteConversation;
+  final Set<String> deletingConversationIds;
   final String currentUserId;
 
   @override
@@ -49,7 +53,7 @@ class MarketplaceMessagesPage extends StatelessWidget {
               ],
             ),
             const Text(
-              'Private chats with buyers and vendors, organized by listing.',
+              'Private chats with buyers and vendors.',
               style: TextStyle(color: Colors.black54),
             ),
             if (isLoading) const LinearProgressIndicator(),
@@ -93,13 +97,32 @@ class MarketplaceMessagesPage extends StatelessWidget {
                       photoUrl: otherPhotoUrl,
                       photoBytes: otherPhotoBytes,
                     ),
-                    title: Text(conversation.listingName),
+                    title: Text(
+                      otherName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                     subtitle: Text(
-                      '$otherName · ${conversation.lastMessage.isEmpty ? 'No messages yet' : conversation.lastMessage}',
+                      conversation.lastMessage.isEmpty
+                          ? 'No messages yet'
+                          : conversation.lastMessage,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    trailing: const Icon(Icons.chevron_right),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Delete conversation',
+                          onPressed:
+                              deletingConversationIds.contains(conversation.id)
+                              ? null
+                              : () => onDeleteConversation(conversation),
+                          icon: const Icon(Icons.delete_outline),
+                        ),
+                        const Icon(Icons.chevron_right),
+                      ],
+                    ),
                     onTap: () => onOpenConversation(conversation),
                   ),
                 );
@@ -248,17 +271,10 @@ class _MarketplaceConversationDialogState
           ),
           const SizedBox(width: 10),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(otherName, maxLines: 1, overflow: TextOverflow.ellipsis),
-                Text(
-                  widget.conversation.listingName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
+            child: Text(
+              otherName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
         ],

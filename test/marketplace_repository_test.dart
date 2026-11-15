@@ -99,6 +99,72 @@ void main() {
     );
   });
 
+  test('buyers can cancel reservations after the listing is removed', () async {
+    final repository = InMemoryMarketplaceRepository();
+    addTearDown(repository.dispose);
+    await repository.register(
+      const MarketplaceCredentials(
+        email: 'removed-listing-vendor@example.test',
+        password: 'local-password',
+        role: 'Vendor',
+      ),
+    );
+    const listing = ProduceListing(
+      id: 'reservation-removed-listing',
+      name: 'Fresh Okra',
+      category: 'Vegetables',
+      price: 42,
+      unit: 'kg',
+      quantity: '5',
+      condition: 'Fresh',
+      vendor: 'Green Basket',
+      vendorInitials: 'GB',
+      location: 'Market Road',
+      imageUrl: '',
+      ownerEmail: 'removed-listing-vendor@example.test',
+    );
+    await repository.addListing(listing);
+    await repository.register(
+      const MarketplaceCredentials(
+        email: 'removed-listing-buyer@example.test',
+        password: 'local-password',
+        role: 'Buyer',
+      ),
+    );
+
+    final reservation = await repository.reserveListing(
+      listing: listing,
+      quantity: 2,
+    );
+    expect(await repository.loadReservations(), hasLength(1));
+
+    await repository.signIn(
+      const MarketplaceCredentials(
+        email: 'removed-listing-vendor@example.test',
+        password: 'local-password',
+        role: 'Vendor',
+      ),
+    );
+    expect(await repository.removeListing(listingId: listing.id), isTrue);
+    await repository.signIn(
+      const MarketplaceCredentials(
+        email: 'removed-listing-buyer@example.test',
+        password: 'local-password',
+        role: 'Buyer',
+      ),
+    );
+
+    expect(
+      await repository.cancelReservation(reservationId: reservation.id),
+      isTrue,
+    );
+    expect(await repository.loadReservations(), isEmpty);
+    expect(
+      await repository.cancelReservation(reservationId: reservation.id),
+      isFalse,
+    );
+  });
+
   test(
     'vendor storefront returns public details and that vendor listings',
     () async {
@@ -701,6 +767,8 @@ void main() {
           email: 'chat-vendor@example.test',
           password: 'local-password',
           role: 'Vendor',
+          fullName: 'Vendor Name',
+          companyName: 'Green Basket',
         ),
       );
       final vendorPhoto = Uint8List.fromList([7, 8, 9]);
@@ -714,6 +782,7 @@ void main() {
           email: 'chat-buyer@example.test',
           password: 'local-password',
           role: 'Buyer',
+          fullName: 'Buyer Name',
         ),
       );
       final buyerPhoto = Uint8List.fromList([1, 2, 3]);
@@ -727,6 +796,17 @@ void main() {
         otherUserId: vendorAccount.id,
         otherName: 'Green Basket',
       );
+      expect(conversation.id, 'pair:${buyerAccount.id}:${vendorAccount.id}');
+      expect(conversation.buyerLabel, 'Buyer Name');
+      expect(conversation.vendorLabel, 'Green Basket');
+      final samePairConversation = await buyer.openConversation(
+        listingId: 'another-chat-listing',
+        listingName: 'Fresh Okra',
+        otherUserId: vendorAccount.id,
+        otherName: 'Green Basket',
+      );
+      expect(samePairConversation.id, conversation.id);
+      expect(await buyer.loadConversations(), hasLength(1));
       expect(conversation.buyerPhotoBytes, buyerPhoto);
       await buyer.sendMessage(
         conversationId: conversation.id,
@@ -767,6 +847,43 @@ void main() {
         (await vendor.loadConversations()).single.buyerUid,
         buyerAccount.id,
       );
+      expect(vendorConversation.buyerLabel, 'Buyer Name');
+      await buyer.deleteConversationForMe(conversationId: conversation.id);
+      expect(await buyer.loadConversations(), isEmpty);
+      expect(await vendor.loadConversations(), hasLength(1));
+
+      await buyer.openConversation(
+        listingId: 'chat-listing',
+        listingName: 'Fresh Tomatoes',
+        otherUserId: vendorAccount.id,
+        otherName: 'Green Basket',
+      );
+      expect(await buyer.loadConversations(), hasLength(1));
+    },
+  );
+
+  test(
+    'chat participants fall back to email when no display name is set',
+    () async {
+      final repository = InMemoryMarketplaceRepository();
+      addTearDown(repository.dispose);
+      final account = await repository.register(
+        const MarketplaceCredentials(
+          email: 'email-only-buyer@example.test',
+          password: 'local-password',
+          role: 'Buyer',
+        ),
+      );
+
+      final conversation = await repository.openConversation(
+        listingId: 'email-only-listing',
+        listingName: 'Fresh Tomatoes',
+        otherUserId: 'email-only-vendor',
+        otherName: 'vendor@example.test',
+      );
+
+      expect(conversation.buyerLabel, account.email);
+      expect(conversation.vendorLabel, 'vendor@example.test');
     },
   );
 }

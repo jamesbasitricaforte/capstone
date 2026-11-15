@@ -8,11 +8,13 @@ import 'package:project_rescue/data/marketplace_service.dart';
 import 'package:project_rescue/data/marketplace_repository.dart';
 import 'package:project_rescue/data/location_services.dart';
 import 'package:project_rescue/main.dart';
+import 'package:project_rescue/models/marketplace_messaging.dart';
 import 'package:project_rescue/models/produce_listing.dart';
 import 'package:project_rescue/models/marketplace_purchase.dart';
 import 'package:project_rescue/models/marketplace_trust.dart';
 import 'package:project_rescue/models/vendor_store_profile.dart';
 import 'package:project_rescue/widgets/profile_photo_avatar.dart';
+import 'package:project_rescue/widgets/marketplace_messages_page.dart';
 import 'package:project_rescue/widgets/vendor_locations_page.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -283,6 +285,87 @@ class _NearbyMarketplaceRepository extends InMemoryMarketplaceRepository {
 }
 
 void main() {
+  testWidgets('message inbox shows participant names and delete action', (
+    tester,
+  ) async {
+    var deleteTapped = false;
+    final conversation = MarketplaceConversation(
+      id: 'pair:buyer:vendor',
+      listingId: 'listing-1',
+      listingName: 'Fresh Tomatoes',
+      buyerUid: 'buyer',
+      vendorUid: 'vendor',
+      buyerLabel: 'Buyer Name',
+      vendorLabel: 'Green Basket',
+      updatedAt: DateTime(2026),
+      lastMessage: 'Hello',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MarketplaceMessagesPage(
+          conversations: [conversation],
+          isLoading: false,
+          error: null,
+          onRefresh: () {},
+          onOpenConversation: (_) {},
+          onDeleteConversation: (_) async {
+            deleteTapped = true;
+          },
+          deletingConversationIds: const {},
+          currentUserId: 'buyer',
+        ),
+      ),
+    );
+
+    expect(find.text('Green Basket'), findsOneWidget);
+    expect(find.text('vendor@example.com'), findsNothing);
+    expect(find.text('Hello'), findsOneWidget);
+    await tester.tap(find.byTooltip('Delete conversation'));
+    await tester.pumpAndSettle();
+    expect(deleteTapped, isTrue);
+  });
+
+  testWidgets('chat header omits listing category and shows participant email', (
+    tester,
+  ) async {
+    final repository = InMemoryMarketplaceRepository()
+      ..setAuthenticatedAccount(
+        const MarketplaceAccount(
+          id: 'buyer',
+          role: 'Buyer',
+          email: 'buyer@example.com',
+        ),
+      );
+    addTearDown(repository.dispose);
+    final conversation = MarketplaceConversation(
+      id: 'pair:buyer:vendor',
+      listingId: 'listing-1',
+      listingName: 'Vegetables',
+      buyerUid: 'buyer',
+      vendorUid: 'vendor',
+      buyerLabel: 'Buyer Name',
+      vendorLabel: 'vendor@example.com',
+      updatedAt: DateTime(2026),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MarketplaceConversationDialog(
+            repository: repository,
+            conversation: conversation,
+            currentUserId: 'buyer',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('vendor@example.com'), findsOneWidget);
+    expect(find.text('Vegetables'), findsNothing);
+  });
+
   testWidgets('unverified accounts still open the marketplace without email checks', (
     tester,
   ) async {
@@ -1480,7 +1563,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Share your fresh produce'), findsOneWidget);
-    expect(find.text('Hosted product photo URL (optional)'), findsOneWidget);
+    expect(find.text('Hosted product photo URL (optional)'), findsNothing);
     expect(find.text('Add photos'), findsNothing);
     expect(find.text('Add videos (0/10)'), findsNothing);
   });

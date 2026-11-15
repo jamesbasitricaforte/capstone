@@ -15,6 +15,7 @@ class MarketplaceConversation {
     this.vendorPhotoUrl,
     this.buyerPhotoBytes,
     this.vendorPhotoBytes,
+    this.hiddenBy = const [],
   });
 
   final String id;
@@ -30,6 +31,7 @@ class MarketplaceConversation {
   final String? vendorPhotoUrl;
   final Uint8List? buyerPhotoBytes;
   final Uint8List? vendorPhotoBytes;
+  final List<String> hiddenBy;
 }
 
 class MarketplaceMessage {

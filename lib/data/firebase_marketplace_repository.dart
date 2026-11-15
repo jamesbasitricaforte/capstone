@@ -805,9 +805,8 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
       final listingReference = _firestore.collection('listings').doc(listingId);
       final listingDocument = await transaction.get(listingReference);
       if (!listingDocument.exists) {
-        throw StateError(
-          'The listing was removed, so its reserved quantity cannot be restored.',
-        );
+        transaction.update(reservationReference, {'status': 'cancelled'});
+        return true;
       }
 
       final listingData = listingDocument.data()!;
@@ -1145,23 +1144,64 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
       final isBuyer = account.role == 'Buyer';
       final buyerUid = isBuyer ? account.id : otherUserId;
       final vendorUid = isBuyer ? otherUserId : account.id;
-      final reference = _conversationCollection.doc(
-        '$listingId:$buyerUid:$vendorUid',
-      );
-      final existing = await reference.get();
-      if (existing.exists) return _conversationFromDocument(existing);
-
       final buyerLabel = isBuyer
           ? _buyerMessageLabel(account)
-          : otherName.trim();
+          : await _buyerCounterpartyLabel(
+              orderDocumentId: orderDocumentId,
+              buyerUid: buyerUid,
+              vendorUid: vendorUid,
+              suggestedName: otherName,
+            );
       final vendorLabel = isBuyer
-          ? otherName.trim()
+          ? _displayNameOrEmail(otherName, 'Vendor')
           : _vendorMessageLabel(account);
       final buyerPhotoUrl = isBuyer ? account.profilePhotoUrl : null;
       final vendorPhotoUrl = isBuyer ? null : account.profilePhotoUrl;
       final buyerPhotoBytes = isBuyer ? account.profilePhotoBytes : null;
       final vendorPhotoBytes = isBuyer ? null : account.profilePhotoBytes;
       final now = DateTime.now();
+      final existingConversations =
+          (await _participantConversationQuery(account).get()).docs
+              .where(
+                (document) =>
+                    document.data()['buyer_uid'] == buyerUid &&
+                    document.data()['vendor_uid'] == vendorUid,
+              )
+              .toList()
+            ..sort(
+              (first, second) =>
+                  _conversationUpdatedAt(second.data())
+                      .compareTo(_conversationUpdatedAt(first.data())),
+            );
+      if (existingConversations.isNotEmpty) {
+        final existing = existingConversations.first;
+        final existingData = existing.data();
+        if ((existing.data()['hidden_by'] as List? ?? const []).contains(
+          account.id,
+        )) {
+          await existing.reference.update({
+            'hidden_by': FieldValue.arrayRemove([account.id]),
+          });
+        }
+        final existingLabel = isBuyer
+            ? existingData['buyer_label']
+            : existingData['vendor_label'];
+        if (existingLabel != (isBuyer ? buyerLabel : vendorLabel)) {
+          await existing.reference.update({
+            isBuyer ? 'buyer_label' : 'vendor_label': isBuyer
+                ? buyerLabel
+                : vendorLabel,
+          });
+        }
+        return await _conversationForDisplay(
+          await existing.reference.get(),
+          account,
+        );
+      }
+
+      final reference = _conversationCollection.doc(
+        'pair:$buyerUid:$vendorUid',
+      );
       final data = <String, Object?>{
         'listing_id': listingId,
         'listing_name': listingName,
@@ -1178,24 +1218,41 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
             ? null
             : Blob(vendorPhotoBytes),
         'last_message': '',
+        'hidden_by': <String>[],
         'updated_at': FieldValue.serverTimestamp(),
         'order_document_id': orderDocumentId,
       };
-      await reference.set(data);
-      return MarketplaceConversation(
-        id: reference.id,
-        listingId: listingId,
-        listingName: listingName,
-        buyerUid: buyerUid,
-        vendorUid: vendorUid,
-        buyerLabel: buyerLabel,
-        vendorLabel: vendorLabel,
-        updatedAt: now,
-        buyerPhotoUrl: buyerPhotoUrl,
-        vendorPhotoUrl: vendorPhotoUrl,
-        buyerPhotoBytes: buyerPhotoBytes,
-        vendorPhotoBytes: vendorPhotoBytes,
-      );
+      return await _firestore.runTransaction((transaction) async {
+        final existing = await transaction.get(reference);
+        if (existing.exists) {
+          final hiddenBy = existing.data()?['hidden_by'] as List? ?? const [];
+          if (hiddenBy.contains(account.id)) {
+            transaction.update(reference, {
+              'hidden_by': FieldValue.arrayRemove([account.id]),
+            });
+          }
+          return _copyConversationWithLabels(
+            _conversationFromDocument(existing),
+            buyerLabel: buyerLabel,
+            vendorLabel: vendorLabel,
+          );
+        }
+        transaction.set(reference, data);
+        return MarketplaceConversation(
+          id: reference.id,
+          listingId: listingId,
+          listingName: listingName,
+          buyerUid: buyerUid,
+          vendorUid: vendorUid,
+          buyerLabel: buyerLabel,
+          vendorLabel: vendorLabel,
+          updatedAt: now,
+          buyerPhotoUrl: buyerPhotoUrl,
+          vendorPhotoUrl: vendorPhotoUrl,
+          buyerPhotoBytes: buyerPhotoBytes,
+          vendorPhotoBytes: vendorPhotoBytes,
+        );
+      });
     } on FirebaseException catch (error) {
       if (_isPermissionDenied(error)) {
         return super.openConversation(
@@ -1214,22 +1271,31 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
   Future<List<MarketplaceConversation>> loadConversations() async {
     try {
       final account = await _requireMessagingAccount();
-      final snapshots = await Future.wait([
-        _conversationCollection.where('buyer_uid', isEqualTo: account.id).get(),
-        _conversationCollection
-            .where('vendor_uid', isEqualTo: account.id)
-            .get(),
-      ]);
-      final documents = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
-      for (final snapshot in snapshots) {
-        for (final document in snapshot.docs) {
-          documents[document.id] = document;
+      final snapshot = await _participantConversationQuery(account).get();
+      final latestByPair = <String, MarketplaceConversation>{};
+      final loadedConversations = await Future.wait(
+        snapshot.docs.map(
+          (document) => _conversationForDisplay(document, account),
+        ),
+      );
+      for (final conversation in loadedConversations) {
+        final pairKey =
+            '${conversation.buyerUid}\u0000${conversation.vendorUid}';
+        final existing = latestByPair[pairKey];
+        if (existing == null ||
+            conversation.updatedAt.isAfter(existing.updatedAt)) {
+          latestByPair[pairKey] = conversation;
         }
       }
       final conversations =
-          documents.values.map(_conversationFromDocument).toList()..sort(
-            (first, second) => second.updatedAt.compareTo(first.updatedAt),
-          );
+          latestByPair.values
+              .where(
+                (conversation) => !conversation.hiddenBy.contains(account.id),
+              )
+              .toList()
+            ..sort(
+              (first, second) => second.updatedAt.compareTo(first.updatedAt),
+            );
       return List.unmodifiable(conversations);
     } on FirebaseException catch (error) {
       if (_isPermissionDenied(error)) {
@@ -1364,6 +1430,47 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
   }
 
   @override
+  Future<void> deleteConversationForMe({required String conversationId}) async {
+    try {
+      final account = await _requireMessagingAccount();
+      final conversationReference = _conversationCollection.doc(conversationId);
+      final conversation = await conversationReference.get();
+      final data = conversation.data();
+      if (data == null || !_isConversationParticipant(data, account.id)) {
+        throw const MarketplaceApiException('Conversation not found.');
+      }
+
+      final buyerUid = data['buyer_uid'];
+      final vendorUid = data['vendor_uid'];
+      if (buyerUid is! String || vendorUid is! String) {
+        throw const FormatException(
+          'The conversation participants are invalid.',
+        );
+      }
+      final pairDocuments = (await _participantConversationQuery(account).get())
+          .docs
+          .where(
+            (document) =>
+                document.data()['buyer_uid'] == buyerUid &&
+                document.data()['vendor_uid'] == vendorUid,
+          );
+      for (final document in pairDocuments) {
+        final hiddenBy = document.data()['hidden_by'] as List? ?? const [];
+        if (hiddenBy.contains(account.id)) continue;
+        await document.reference.update({
+          'hidden_by': FieldValue.arrayUnion([account.id]),
+        });
+      }
+    } on FirebaseException catch (error) {
+      if (_isPermissionDenied(error)) {
+        await super.deleteConversationForMe(conversationId: conversationId);
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  @override
   void dispose() {
     unawaited(_listingSubscription.cancel());
     unawaited(_listingUpdates.close());
@@ -1439,7 +1546,116 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
       vendorPhotoUrl: data['vendor_photo_url'] as String?,
       buyerPhotoBytes: _profilePhotoBytesFromValue(data['buyer_photo_bytes']),
       vendorPhotoBytes: _profilePhotoBytesFromValue(data['vendor_photo_bytes']),
+      hiddenBy: (data['hidden_by'] as List? ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
     );
+  }
+
+  Future<MarketplaceConversation> _conversationForDisplay(
+    DocumentSnapshot<Map<String, dynamic>> document,
+    MarketplaceAccount account,
+  ) async {
+    final conversation = _conversationFromDocument(document);
+    final data = document.data()!;
+    if (conversation.buyerLabel == 'Buyer' &&
+        conversation.buyerUid == account.id) {
+      final buyerLabel = _buyerMessageLabel(account);
+      await document.reference.update({'buyer_label': buyerLabel});
+      return _copyConversationWithLabels(conversation, buyerLabel: buyerLabel);
+    }
+    if (conversation.vendorLabel == 'Vendor' &&
+        conversation.vendorUid == account.id) {
+      final vendorLabel = _vendorMessageLabel(account);
+      await document.reference.update({'vendor_label': vendorLabel});
+      return _copyConversationWithLabels(
+        conversation,
+        vendorLabel: vendorLabel,
+      );
+    }
+    final orderDocumentId = data['order_document_id'];
+    if (conversation.buyerLabel != 'Buyer' ||
+        orderDocumentId is! String ||
+        orderDocumentId.isEmpty) {
+      return conversation;
+    }
+    final buyerLabel = await _buyerCounterpartyLabel(
+      orderDocumentId: orderDocumentId,
+      buyerUid: conversation.buyerUid,
+      vendorUid: conversation.vendorUid,
+      suggestedName: conversation.buyerLabel,
+    );
+    return _copyConversationWithLabels(conversation, buyerLabel: buyerLabel);
+  }
+
+  MarketplaceConversation _copyConversationWithLabels(
+    MarketplaceConversation conversation, {
+    String? buyerLabel,
+    String? vendorLabel,
+  }) => MarketplaceConversation(
+    id: conversation.id,
+    listingId: conversation.listingId,
+    listingName: conversation.listingName,
+    buyerUid: conversation.buyerUid,
+    vendorUid: conversation.vendorUid,
+    buyerLabel: buyerLabel ?? conversation.buyerLabel,
+    vendorLabel: vendorLabel ?? conversation.vendorLabel,
+    updatedAt: conversation.updatedAt,
+    lastMessage: conversation.lastMessage,
+    buyerPhotoUrl: conversation.buyerPhotoUrl,
+    vendorPhotoUrl: conversation.vendorPhotoUrl,
+    buyerPhotoBytes: conversation.buyerPhotoBytes,
+    vendorPhotoBytes: conversation.vendorPhotoBytes,
+    hiddenBy: conversation.hiddenBy,
+  );
+
+  Query<Map<String, dynamic>> _participantConversationQuery(
+    MarketplaceAccount account,
+  ) => _conversationCollection.where(
+    account.role == 'Buyer' ? 'buyer_uid' : 'vendor_uid',
+    isEqualTo: account.id,
+  );
+
+  DateTime _conversationUpdatedAt(Map<String, dynamic> data) {
+    final value = data['updated_at'];
+    if (value is! Timestamp) {
+      throw const FormatException('The conversation date is invalid.');
+    }
+    return value.toDate();
+  }
+
+  Future<String> _buyerCounterpartyLabel({
+    required String? orderDocumentId,
+    required String buyerUid,
+    required String vendorUid,
+    required String suggestedName,
+  }) async {
+    if (orderDocumentId != null && orderDocumentId.isNotEmpty) {
+      final order = await _marketplaceTransactions.doc(orderDocumentId).get();
+      final data = order.data();
+      if (data != null &&
+          data['kind'] == 'order' &&
+          data['buyer_uid'] == buyerUid &&
+          data['vendor_uid'] == vendorUid) {
+        final buyerName = data['buyer_name'];
+        if (buyerName is String &&
+            buyerName.trim().isNotEmpty &&
+            buyerName.trim() != 'Buyer') {
+          return buyerName.trim();
+        }
+        final buyerEmail = data['buyer_email'];
+        if (buyerEmail is String && buyerEmail.trim().isNotEmpty) {
+          return buyerEmail.trim();
+        }
+      }
+    }
+    final suggested = suggestedName.trim();
+    return suggested.isEmpty ? 'Buyer' : suggested;
+  }
+
+  String _displayNameOrEmail(String value, String fallback) {
+    final name = value.trim();
+    return name.isEmpty ? fallback : name;
   }
 
   Future<MarketplaceMessage> _messageFromDocument(
@@ -1701,6 +1917,7 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
     'kind': kind,
     'buyer_uid': buyer.id,
     'buyer_email': buyer.email,
+    'buyer_name': _buyerMessageLabel(buyer),
     'vendor_uid': listingData['vendor_uid'],
     'listing_id': listingId,
     'listing': listingSnapshot,

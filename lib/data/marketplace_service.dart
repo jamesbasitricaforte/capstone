@@ -476,7 +476,10 @@ class MarketplaceService {
     final listingIndex = _sampleListings.indexWhere(
       (listing) => listing.id == reservation.listing.id,
     );
-    if (listingIndex == -1) return false;
+    if (listingIndex == -1) {
+      _reservations.removeAt(reservationIndex);
+      return true;
+    }
 
     final listing = _sampleListings[listingIndex];
     _remainingInventory[listing.id] =
@@ -580,22 +583,66 @@ class MarketplaceService {
     }
     final updated = MarketplaceConversation(
       id: existing.id,
-      listingId: existing.listingId,
-      listingName: existing.listingName,
+      listingId: conversation.listingId,
+      listingName: conversation.listingName,
       buyerUid: existing.buyerUid,
       vendorUid: existing.vendorUid,
-      buyerLabel: existing.buyerLabel,
-      vendorLabel: existing.vendorLabel,
-      updatedAt: existing.updatedAt,
+      buyerLabel: conversation.buyerLabel,
+      vendorLabel: conversation.vendorLabel,
+      updatedAt: conversation.updatedAt,
       lastMessage: existing.lastMessage,
       buyerPhotoUrl: conversation.buyerPhotoUrl ?? existing.buyerPhotoUrl,
       vendorPhotoUrl: conversation.vendorPhotoUrl ?? existing.vendorPhotoUrl,
       buyerPhotoBytes: conversation.buyerPhotoBytes ?? existing.buyerPhotoBytes,
       vendorPhotoBytes:
           conversation.vendorPhotoBytes ?? existing.vendorPhotoBytes,
+      hiddenBy: conversation.hiddenBy,
     );
     _conversations[conversation.id] = updated;
     return updated;
+  }
+
+  MarketplaceConversation? conversationForPair(
+    String buyerUid,
+    String vendorUid,
+  ) {
+    final matches =
+        _conversations.values
+            .where(
+              (conversation) =>
+                  conversation.buyerUid == buyerUid &&
+                  conversation.vendorUid == vendorUid,
+            )
+            .toList()
+          ..sort(
+            (first, second) => second.updatedAt.compareTo(first.updatedAt),
+          );
+    return matches.firstOrNull;
+  }
+
+  bool hideConversationForUser({
+    required String conversationId,
+    required String userId,
+  }) {
+    final target = _conversations[conversationId];
+    if (target == null ||
+        (target.buyerUid != userId && target.vendorUid != userId)) {
+      return false;
+    }
+
+    for (final entry in _conversations.entries.toList()) {
+      final conversation = entry.value;
+      if (conversation.buyerUid != target.buyerUid ||
+          conversation.vendorUid != target.vendorUid ||
+          conversation.hiddenBy.contains(userId)) {
+        continue;
+      }
+      _conversations[entry.key] = _copyConversation(
+        conversation,
+        hiddenBy: [...conversation.hiddenBy, userId],
+      );
+    }
+    return true;
   }
 
   void updateProfilePhotoForUser(String userId, Uint8List imageBytes) {
@@ -622,19 +669,29 @@ class MarketplaceService {
         vendorPhotoBytes: conversation.vendorUid == userId
             ? imageBytes
             : conversation.vendorPhotoBytes,
+        hiddenBy: conversation.hiddenBy,
       );
     }
   }
 
-  List<MarketplaceConversation> conversationsFor(String userId) =>
-      _conversations.values
-          .where(
-            (conversation) =>
-                conversation.buyerUid == userId ||
-                conversation.vendorUid == userId,
-          )
-          .toList()
-        ..sort((first, second) => second.updatedAt.compareTo(first.updatedAt));
+  List<MarketplaceConversation> conversationsFor(String userId) {
+    final latestByPair = <String, MarketplaceConversation>{};
+    for (final conversation in _conversations.values) {
+      if (conversation.buyerUid != userId && conversation.vendorUid != userId) {
+        continue;
+      }
+      final key = '${conversation.buyerUid}\u0000${conversation.vendorUid}';
+      final existing = latestByPair[key];
+      if (existing == null ||
+          conversation.updatedAt.isAfter(existing.updatedAt)) {
+        latestByPair[key] = conversation;
+      }
+    }
+    return latestByPair.values
+        .where((conversation) => !conversation.hiddenBy.contains(userId))
+        .toList()
+      ..sort((first, second) => second.updatedAt.compareTo(first.updatedAt));
+  }
 
   Stream<List<MarketplaceMessage>> watchMessages(
     String conversationId,
@@ -672,6 +729,7 @@ class MarketplaceService {
         vendorPhotoUrl: conversation.vendorPhotoUrl,
         buyerPhotoBytes: conversation.buyerPhotoBytes,
         vendorPhotoBytes: conversation.vendorPhotoBytes,
+        hiddenBy: conversation.hiddenBy,
       );
     }
     _messageControllers[conversationId]?.add(
@@ -716,6 +774,26 @@ class MarketplaceService {
       ),
     );
   }
+
+  MarketplaceConversation _copyConversation(
+    MarketplaceConversation conversation, {
+    required List<String> hiddenBy,
+  }) => MarketplaceConversation(
+    id: conversation.id,
+    listingId: conversation.listingId,
+    listingName: conversation.listingName,
+    buyerUid: conversation.buyerUid,
+    vendorUid: conversation.vendorUid,
+    buyerLabel: conversation.buyerLabel,
+    vendorLabel: conversation.vendorLabel,
+    updatedAt: conversation.updatedAt,
+    lastMessage: conversation.lastMessage,
+    buyerPhotoUrl: conversation.buyerPhotoUrl,
+    vendorPhotoUrl: conversation.vendorPhotoUrl,
+    buyerPhotoBytes: conversation.buyerPhotoBytes,
+    vendorPhotoBytes: conversation.vendorPhotoBytes,
+    hiddenBy: List.unmodifiable(hiddenBy),
+  );
 
   List<ProduceOrder> ordersForVendor(String vendorEmail) {
     final vendorOrders = <ProduceOrder>[];

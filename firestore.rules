@@ -254,6 +254,25 @@ service cloud.firestore {
         && listingAfter.updated_at == request.time;
     }
 
+    function validReservationCancellationWithoutListing(
+      transactionId,
+      buyerId,
+      reservationBefore,
+      reservationAfter
+    ) {
+      return isBuyer(buyerId)
+        && reservationBefore.id == transactionId
+        && reservationBefore.buyer_uid == buyerId
+        && reservationBefore.listing_id is string
+        && reservationBefore.kind == 'reservation'
+        && reservationBefore.status == 'reserved'
+        && reservationBefore.quantity is int
+        && reservationBefore.quantity > 0
+        && reservationAfter.status == 'cancelled'
+        && reservationAfter.diff(reservationBefore).affectedKeys()
+          .hasOnly(['status']);
+    }
+
     function validBuyerReservationRestock(listingId) {
       let transactionId = request.resource.data.last_inventory_transaction_id;
       let reservationPath = /databases/$(database)/documents/marketplace_transactions/$(transactionId);
@@ -280,19 +299,31 @@ service cloud.firestore {
     ) {
       let listingId = reservationBefore.listing_id;
       let listingPath = /databases/$(database)/documents/listings/$(listingId);
-      let listingBefore = get(listingPath).data;
-      let listingAfter = getAfter(listingPath).data;
       return listingId is string
-        && exists(listingPath)
-        && existsAfter(listingPath)
-        && validReservationCancellation(
-          transactionId,
-          listingId,
-          request.auth.uid,
-          reservationBefore,
-          reservationAfter,
-          listingBefore,
-          listingAfter
+        && (
+          (
+            exists(listingPath)
+            && existsAfter(listingPath)
+            && validReservationCancellation(
+              transactionId,
+              listingId,
+              request.auth.uid,
+              reservationBefore,
+              reservationAfter,
+              get(listingPath).data,
+              getAfter(listingPath).data
+            )
+          )
+          || (
+            !exists(listingPath)
+            && !existsAfter(listingPath)
+            && validReservationCancellationWithoutListing(
+              transactionId,
+              request.auth.uid,
+              reservationBefore,
+              reservationAfter
+            )
+          )
         );
     }
 
@@ -307,6 +338,7 @@ service cloud.firestore {
           'kind',
           'buyer_uid',
           'buyer_email',
+          'buyer_name',
           'vendor_uid',
           'listing_id',
           'listing',
@@ -322,6 +354,7 @@ service cloud.firestore {
           'kind',
           'buyer_uid',
           'buyer_email',
+          'buyer_name',
           'vendor_uid',
           'listing_id',
           'listing',
@@ -336,6 +369,8 @@ service cloud.firestore {
         && data.kind in ['order', 'reservation']
         && data.buyer_uid == request.auth.uid
         && data.buyer_email == request.auth.token.email
+        && data.buyer_name is string
+        && data.buyer_name.size() > 0
         && data.listing_id is string
         && exists(listingPath)
         && listingBefore.status == 'active'
@@ -705,6 +740,7 @@ service cloud.firestore {
             'buyer_photo_bytes',
             'vendor_photo_bytes',
             'last_message',
+            'hidden_by',
             'updated_at'
           ])
           && data.keys().hasOnly([
@@ -719,6 +755,7 @@ service cloud.firestore {
             'buyer_photo_bytes',
             'vendor_photo_bytes',
             'last_message',
+            'hidden_by',
             'updated_at',
             'order_document_id'
           ])
@@ -754,6 +791,8 @@ service cloud.firestore {
           )
           && data.last_message is string
           && data.last_message.size() <= 2000
+          && data.hidden_by is list
+          && data.hidden_by.size() == 0
           && data.updated_at == request.time
           && exists(buyerPath)
           && get(buyerPath).data.role == 'Buyer'
@@ -781,6 +820,62 @@ service cloud.firestore {
           );
       }
 
+      function validConversationVisibilityUpdate() {
+        let hiddenBefore = resource.data.keys().hasAny(['hidden_by'])
+          ? resource.data.hidden_by
+          : [];
+        let hiddenAfter = request.resource.data.hidden_by;
+        return isParticipant(resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['hidden_by'])
+          && hiddenBefore is list
+          && hiddenAfter is list
+          && (
+            (
+              hiddenAfter.size() == hiddenBefore.size() + 1
+              && hiddenAfter.hasAll(hiddenBefore)
+              && hiddenAfter.hasAny([request.auth.uid])
+            )
+            || (
+              hiddenBefore.size() == hiddenAfter.size() + 1
+              && hiddenBefore.hasAll(hiddenAfter)
+              && hiddenBefore.hasAny([request.auth.uid])
+              && !hiddenAfter.hasAny([request.auth.uid])
+            )
+          );
+      }
+
+      function validConversationParticipantLabelUpdate() {
+        let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+        let user = get(userPath).data;
+        let changedKeys = request.resource.data.diff(resource.data)
+          .affectedKeys();
+        return (
+            isBuyer(request.auth.uid)
+            && resource.data.buyer_uid == request.auth.uid
+            && changedKeys.hasOnly(['buyer_label'])
+            && request.resource.data.buyer_label
+              == (
+                user.full_name is string && user.full_name.size() > 0
+                  ? user.full_name
+                  : user.email
+              )
+          )
+          || (
+            isVendor(request.auth.uid)
+            && resource.data.vendor_uid == request.auth.uid
+            && changedKeys.hasOnly(['vendor_label'])
+            && request.resource.data.vendor_label
+              == (
+                user.company_name is string && user.company_name.size() > 0
+                  ? user.company_name
+                  : user.full_name is string && user.full_name.size() > 0
+                  ? user.full_name
+                  : user.email
+              )
+          );
+      }
+
       allow get: if signedIn()
         && (
           !exists(
@@ -792,21 +887,24 @@ service cloud.firestore {
       allow create: if signedIn()
         && isParticipant(request.resource.data)
         && conversationId
-          == request.resource.data.listing_id
-            + ':'
+          == 'pair:'
             + request.resource.data.buyer_uid
             + ':'
             + request.resource.data.vendor_uid
         && validConversation(request.resource.data);
-      allow update: if signedIn()
-        && isParticipant(resource.data)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'last_message',
-          'updated_at'
-        ])
-        && request.resource.data.last_message is string
-        && request.resource.data.last_message.size() <= 2000
-        && request.resource.data.updated_at == request.time;
+      allow update: if (
+          signedIn()
+          && isParticipant(resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'last_message',
+            'updated_at'
+          ])
+          && request.resource.data.last_message is string
+          && request.resource.data.last_message.size() <= 2000
+          && request.resource.data.updated_at == request.time
+        )
+        || validConversationVisibilityUpdate()
+        || validConversationParticipantLabelUpdate();
       allow delete: if false;
 
       match /messages/{messageId} {

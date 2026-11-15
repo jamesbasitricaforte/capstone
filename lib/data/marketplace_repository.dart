@@ -235,6 +235,7 @@ abstract interface class MarketplaceRepository implements ReverseGeocoder {
     required String conversationId,
     required String messageId,
   });
+  Future<void> deleteConversationForMe({required String conversationId});
   void dispose();
 }
 
@@ -873,12 +874,31 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
     }
     final buyerUid = isBuyer ? account.id : otherUserId;
     final vendorUid = isBuyer ? otherUserId : account.id;
-    final buyerLabel = isBuyer ? account.email : otherName;
-    final vendorLabel = isBuyer ? otherName : account.email;
+    final existing = _service.conversationForPair(buyerUid, vendorUid);
     final otherAccount = _accounts.values
         .where((candidate) => candidate.id == otherUserId)
         .firstOrNull;
-    final id = '$listingId:$buyerUid:$vendorUid';
+    final proposedBuyerLabel = isBuyer
+        ? _buyerDisplayName(account)
+        : _counterpartyDisplayName(otherAccount, otherName, 'Buyer');
+    final proposedVendorLabel = isBuyer
+        ? _counterpartyDisplayName(otherAccount, otherName, 'Vendor')
+        : _vendorDisplayName(account);
+    final buyerLabel = existing == null
+        ? proposedBuyerLabel
+        : _preserveExistingDisplayName(
+            proposedLabel: proposedBuyerLabel,
+            existingLabel: existing.buyerLabel,
+            roleFallback: 'Buyer',
+          );
+    final vendorLabel = existing == null
+        ? proposedVendorLabel
+        : _preserveExistingDisplayName(
+            proposedLabel: proposedVendorLabel,
+            existingLabel: existing.vendorLabel,
+            roleFallback: 'Vendor',
+          );
+    final id = existing?.id ?? 'pair:$buyerUid:$vendorUid';
     return _service.putConversation(
       MarketplaceConversation(
         id: id,
@@ -901,6 +921,9 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
         vendorPhotoBytes: isBuyer
             ? otherAccount?.profilePhotoBytes
             : account.profilePhotoBytes,
+        hiddenBy: (existing?.hiddenBy ?? const <String>[])
+            .where((userId) => userId != account.id)
+            .toList(growable: false),
       ),
     );
   }
@@ -962,7 +985,68 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
   }
 
   @override
+  Future<void> deleteConversationForMe({required String conversationId}) async {
+    final account = _requireAccount();
+    if (!_service.hideConversationForUser(
+      conversationId: conversationId,
+      userId: account.id,
+    )) {
+      throw const MarketplaceApiException(
+        'Conversation is no longer available.',
+      );
+    }
+  }
+
+  @override
   void dispose() {}
+
+  String _buyerDisplayName(MarketplaceAccount account) {
+    final name = account.fullName?.trim();
+    return name == null || name.isEmpty ? account.email : name;
+  }
+
+  String _vendorDisplayName(MarketplaceAccount account) {
+    final companyName = _nameWithoutEmail(account.companyName, 'Vendor');
+    if (companyName != 'Vendor') return companyName;
+    final fullName = account.fullName?.trim();
+    return fullName == null || fullName.isEmpty ? account.email : fullName;
+  }
+
+  String _counterpartyDisplayName(
+    MarketplaceAccount? account,
+    String suggestedName,
+    String roleFallback,
+  ) {
+    if (account != null) {
+      return account.role == 'Buyer'
+          ? _buyerDisplayName(account)
+          : _vendorDisplayName(account);
+    }
+    final name = suggestedName.trim();
+    return name.isEmpty ? roleFallback : name;
+  }
+
+  String _preserveExistingDisplayName({
+    required String proposedLabel,
+    required String existingLabel,
+    required String roleFallback,
+  }) {
+    final existingIsSpecificName =
+        existingLabel != roleFallback && existingLabel.isNotEmpty;
+    final proposedIsFallback = proposedLabel == roleFallback;
+    final proposedIsEmail = proposedLabel.contains('@');
+    final existingIsEmail = existingLabel.contains('@');
+    if (existingIsSpecificName &&
+        (proposedIsFallback || (proposedIsEmail && !existingIsEmail))) {
+      return existingLabel;
+    }
+    return proposedLabel;
+  }
+
+  String _nameWithoutEmail(String? value, String fallback) {
+    final name = value?.trim() ?? '';
+    return name.isEmpty || name.contains('@') ? fallback : name;
+  }
 
   MarketplaceAccount _requireAccount() {
     final account = _currentAccount;
