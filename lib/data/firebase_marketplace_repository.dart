@@ -14,6 +14,7 @@ import '../models/vendor_store_profile.dart';
 import 'firestore_image_compressor.dart';
 import 'firebase_listing_service.dart';
 import 'marketplace_repository.dart';
+import 'marketplace_service.dart';
 
 class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
   FirebaseMarketplaceRepository({
@@ -275,6 +276,144 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
       (await _listingService.loadPublicListings())
           .map(publicListing)
           .toList(growable: false);
+
+  @override
+  Future<List<MarketplaceNotification>> loadNotifications() async {
+    try {
+      final account = await _requireMessagingAccount();
+      final user = _auth.currentUser!;
+      final profile = (await _userDocument(user).get()).data()!;
+      final readAt = _notificationReadAt(profile);
+      final notifications = <MarketplaceNotification>[];
+      if (account.role == 'Buyer') {
+        final snapshot = await _firestore
+            .collection('listings')
+            .where('posted_at', isGreaterThan: Timestamp.fromDate(readAt))
+            .get();
+        for (final document in snapshot.docs) {
+          final listing = await _listingService.listingFromDocument(document);
+          final postedAt = listing.postedAt;
+          if (postedAt == null) continue;
+          notifications.add(
+            MarketplaceNotification(
+              id: 'notification-${listing.id}-${postedAt.microsecondsSinceEpoch}',
+              listing: listing,
+              targetRole: 'Buyer',
+              createdAt: postedAt,
+            ),
+          );
+        }
+      } else {
+        final snapshot = await _marketplaceTransactions
+            .where('vendor_uid', isEqualTo: account.id)
+            .get();
+        for (final document in snapshot.docs) {
+          final createdAt = document.data()['created_at'];
+          if (createdAt is! Timestamp || !createdAt.toDate().isAfter(readAt)) {
+            continue;
+          }
+          notifications.add(_notificationFromTransaction(document));
+        }
+      }
+      notifications.sort(
+        (first, second) => second.createdAt.compareTo(first.createdAt),
+      );
+      return List.unmodifiable(notifications);
+    } on FirebaseException catch (error) {
+      throw MarketplaceApiException(
+        'Could not load notifications: ${error.message ?? error.code}',
+      );
+    }
+  }
+
+  @override
+  Future<void> markNotificationsRead() async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw const MarketplaceApiException('Please sign in to continue.');
+    }
+    try {
+      await _userDocument(user)
+          .update({'notifications_read_at': FieldValue.serverTimestamp()});
+    } on FirebaseException catch (error) {
+      throw MarketplaceApiException(
+        'Could not update notification status: '
+        '${error.message ?? error.code}',
+      );
+    }
+  }
+
+  @override
+  Stream<MarketplaceNotification> watchVendorNotifications() {
+    final startedAt = DateTime.now();
+    return _watchVendorNotifications(startedAt);
+  }
+
+  Stream<MarketplaceNotification> _watchVendorNotifications(
+    DateTime startedAt,
+  ) async* {
+    final vendor = await _requireCommerceAccount('Vendor');
+    final snapshots = _marketplaceTransactions
+        .where('vendor_uid', isEqualTo: vendor.id)
+        .snapshots();
+    await for (final snapshot in snapshots) {
+      for (final change in snapshot.docChanges) {
+        if (change.type != DocumentChangeType.added) continue;
+        final data = change.doc.data();
+        if (data == null) continue;
+        final createdAt = data['created_at'];
+        if (createdAt is! Timestamp || !createdAt.toDate().isAfter(startedAt)) {
+          continue;
+        }
+        yield _notificationFromTransaction(change.doc);
+      }
+    }
+  }
+
+  DateTime _notificationReadAt(Map<String, dynamic> profile) {
+    final lastRead = profile['notifications_read_at'];
+    if (lastRead is Timestamp) return lastRead.toDate();
+    final accountCreatedAt = profile['created_at'];
+    if (accountCreatedAt is Timestamp) return accountCreatedAt.toDate();
+    return DateTime.now();
+  }
+
+  MarketplaceNotification _notificationFromTransaction(
+    DocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final data = document.data();
+    if (data == null) {
+      throw FormatException('Transaction ${document.id} has no data.');
+    }
+    final type = switch (data['kind']) {
+      'order' => MarketplaceNotificationType.purchase,
+      'reservation' => MarketplaceNotificationType.reservation,
+      _ => throw FormatException(
+        'Transaction ${document.id} has an invalid notification type.',
+      ),
+    };
+    return MarketplaceNotification(
+      id: 'notification-${document.id}',
+      type: type,
+      listing: ProduceListing.fromJson(
+        Map<String, dynamic>.from(data['listing'] as Map),
+      ),
+      buyerName: data['buyer_name'] is String
+          ? data['buyer_name'] as String
+          : null,
+      quantity: _positiveInt(
+        data['quantity'],
+        'A marketplace notification has an invalid quantity.',
+      ),
+      total: _positiveInt(
+        data['total'],
+        'A marketplace notification has an invalid total.',
+      ),
+      recipientUid: _requiredString(data, 'vendor_uid'),
+      targetRole: 'Vendor',
+      createdAt: _dateFromValue(data['created_at']),
+    );
+  }
 
   @override
   Future<List<ProduceListing>> loadNearbyListings({
@@ -1076,6 +1215,7 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
     if (account.role == 'Vendor') {
       await _writeVendorPublicProfile(account);
     }
+    await _updateConversationProfilePhotos(account);
     super.setAuthenticatedAccount(account);
     return account;
   }
@@ -1105,8 +1245,36 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
     if (account.role == 'Vendor') {
       await _writeVendorPublicProfile(account);
     }
+    await _updateConversationProfilePhotos(account);
     super.setAuthenticatedAccount(account);
     return account;
+  }
+
+  Future<void> _updateConversationProfilePhotos(
+    MarketplaceAccount account,
+  ) async {
+    final conversations = await _participantConversationQuery(account).get();
+    final photoFields = account.role == 'Buyer'
+        ? <String, Object?>{
+            'buyer_photo_url': account.profilePhotoUrl,
+            'buyer_photo_bytes': account.profilePhotoBytes == null
+                ? null
+                : Blob(account.profilePhotoBytes!),
+          }
+        : <String, Object?>{
+            'vendor_photo_url': account.profilePhotoUrl,
+            'vendor_photo_bytes': account.profilePhotoBytes == null
+                ? null
+                : Blob(account.profilePhotoBytes!),
+          };
+
+    for (var start = 0; start < conversations.docs.length; start += 450) {
+      final batch = _firestore.batch();
+      for (final conversation in conversations.docs.skip(start).take(450)) {
+        batch.update(conversation.reference, photoFields);
+      }
+      await batch.commit();
+    }
   }
 
   @override
@@ -1272,37 +1440,54 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
     try {
       final account = await _requireMessagingAccount();
       final snapshot = await _participantConversationQuery(account).get();
-      final latestByPair = <String, MarketplaceConversation>{};
-      final loadedConversations = await Future.wait(
-        snapshot.docs.map(
-          (document) => _conversationForDisplay(document, account),
-        ),
-      );
-      for (final conversation in loadedConversations) {
-        final pairKey =
-            '${conversation.buyerUid}\u0000${conversation.vendorUid}';
-        final existing = latestByPair[pairKey];
-        if (existing == null ||
-            conversation.updatedAt.isAfter(existing.updatedAt)) {
-          latestByPair[pairKey] = conversation;
-        }
-      }
-      final conversations =
-          latestByPair.values
-              .where(
-                (conversation) => !conversation.hiddenBy.contains(account.id),
-              )
-              .toList()
-            ..sort(
-              (first, second) => second.updatedAt.compareTo(first.updatedAt),
-            );
-      return List.unmodifiable(conversations);
+      return await _conversationsFromSnapshot(snapshot, account);
     } on FirebaseException catch (error) {
       if (_isPermissionDenied(error)) {
         return super.loadConversations();
       }
       rethrow;
     }
+  }
+
+  @override
+  Stream<List<MarketplaceConversation>> watchConversations() =>
+      Stream<MarketplaceAccount>.fromFuture(_requireMessagingAccount())
+          .asyncExpand(
+            (account) => _participantConversationQuery(account)
+                .snapshots()
+                .asyncMap(
+                  (snapshot) => _conversationsFromSnapshot(snapshot, account),
+                ),
+          );
+
+  Future<List<MarketplaceConversation>> _conversationsFromSnapshot(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+    MarketplaceAccount account,
+  ) async {
+    final latestByPair = <String, MarketplaceConversation>{};
+    final loadedConversations = await Future.wait(
+      snapshot.docs.map(
+        (document) => _conversationForDisplay(document, account),
+      ),
+    );
+    for (final conversation in loadedConversations) {
+      final pairKey = '${conversation.buyerUid}\u0000${conversation.vendorUid}';
+      final existing = latestByPair[pairKey];
+      if (existing == null ||
+          conversation.updatedAt.isAfter(existing.updatedAt)) {
+        latestByPair[pairKey] = conversation;
+      }
+    }
+    final conversations =
+        latestByPair.values
+            .where(
+              (conversation) => !conversation.hiddenBy.contains(account.id),
+            )
+            .toList()
+          ..sort(
+            (first, second) => second.updatedAt.compareTo(first.updatedAt),
+          );
+    return List.unmodifiable(conversations);
   }
 
   @override
@@ -1372,6 +1557,7 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
         })
         ..update(conversationReference, {
           'last_message': messageText.isEmpty ? 'Photo' : messageText,
+          'last_message_sender_uid': account.id,
           'updated_at': FieldValue.serverTimestamp(),
         });
       for (var index = 0; index < imageChunks.length; index++) {
@@ -1542,6 +1728,7 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
       vendorLabel: _requiredString(data, 'vendor_label'),
       updatedAt: updatedAt.toDate(),
       lastMessage: _requiredString(data, 'last_message'),
+      lastMessageSenderUid: data['last_message_sender_uid'] as String?,
       buyerPhotoUrl: data['buyer_photo_url'] as String?,
       vendorPhotoUrl: data['vendor_photo_url'] as String?,
       buyerPhotoBytes: _profilePhotoBytesFromValue(data['buyer_photo_bytes']),
@@ -1602,6 +1789,7 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
     vendorLabel: vendorLabel ?? conversation.vendorLabel,
     updatedAt: conversation.updatedAt,
     lastMessage: conversation.lastMessage,
+    lastMessageSenderUid: conversation.lastMessageSenderUid,
     buyerPhotoUrl: conversation.buyerPhotoUrl,
     vendorPhotoUrl: conversation.vendorPhotoUrl,
     buyerPhotoBytes: conversation.buyerPhotoBytes,

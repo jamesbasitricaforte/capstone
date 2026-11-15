@@ -2,9 +2,90 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:project_rescue/data/marketplace_repository.dart';
+import 'package:project_rescue/data/marketplace_service.dart';
 import 'package:project_rescue/models/produce_listing.dart';
 
 void main() {
+  test(
+    'vendors receive purchase and reservation notifications once unread',
+    () async {
+      final repository = InMemoryMarketplaceRepository();
+      addTearDown(repository.dispose);
+      final vendor = await repository.register(
+        const MarketplaceCredentials(
+          email: 'notification-vendor@example.test',
+          password: 'local-password',
+          role: 'Vendor',
+        ),
+      );
+      final listing = ProduceListing(
+        id: 'vendor-notification-listing',
+        name: 'Fresh Okra',
+        category: 'Vegetables',
+        price: 42,
+        unit: 'kg',
+        quantity: '5',
+        condition: 'Fresh',
+        vendor: 'Green Basket',
+        vendorInitials: 'GB',
+        location: 'Market Road',
+        imageUrl: '',
+        ownerUid: vendor.id,
+      );
+      await repository.addListing(listing);
+      await repository.register(
+        const MarketplaceCredentials(
+          email: 'notification-buyer@example.test',
+          password: 'local-password',
+          role: 'Buyer',
+        ),
+      );
+
+      await repository.signIn(
+        const MarketplaceCredentials(
+          email: 'notification-vendor@example.test',
+          password: 'local-password',
+          role: 'Vendor',
+        ),
+      );
+      final nextVendorNotification = repository
+          .watchVendorNotifications()
+          .first;
+      await repository.signIn(
+        const MarketplaceCredentials(
+          email: 'notification-buyer@example.test',
+          password: 'local-password',
+          role: 'Buyer',
+        ),
+      );
+      await repository.reserveListing(listing: listing, quantity: 1);
+      expect(
+        (await nextVendorNotification).type,
+        MarketplaceNotificationType.reservation,
+      );
+      await repository.buyListing(listing: listing, quantity: 1);
+
+      await repository.signIn(
+        const MarketplaceCredentials(
+          email: 'notification-vendor@example.test',
+          password: 'local-password',
+          role: 'Vendor',
+        ),
+      );
+      final notifications = await repository.loadNotifications();
+      expect(
+        notifications.map((notification) => notification.type),
+        containsAll([
+          MarketplaceNotificationType.reservation,
+          MarketplaceNotificationType.purchase,
+        ]),
+      );
+
+      await repository.markNotificationsRead();
+      expect(await repository.loadNotifications(), isEmpty);
+    },
+  );
+
   test('demo accounts and sample listings work without a server', () async {
     final repository = InMemoryMarketplaceRepository();
     addTearDown(repository.dispose);
@@ -808,6 +889,15 @@ void main() {
       expect(samePairConversation.id, conversation.id);
       expect(await buyer.loadConversations(), hasLength(1));
       expect(conversation.buyerPhotoBytes, buyerPhoto);
+      final updatedBuyerPhoto = Uint8List.fromList([4, 5, 6]);
+      await buyer.updateProfilePhoto(
+        imageBytes: updatedBuyerPhoto,
+        imageName: 'updated-buyer.jpg',
+      );
+      expect(
+        (await buyer.loadConversations()).single.buyerPhotoBytes,
+        updatedBuyerPhoto,
+      );
       await buyer.sendMessage(
         conversationId: conversation.id,
         text: 'Is this available?',
@@ -838,7 +928,7 @@ void main() {
         otherName: buyerAccount.email,
       );
       expect(vendorConversation.vendorPhotoBytes, vendorPhoto);
-      expect(vendorConversation.buyerPhotoBytes, buyerPhoto);
+      expect(vendorConversation.buyerPhotoBytes, updatedBuyerPhoto);
       expect(
         (await vendor.watchMessages(conversation.id).first).single.text,
         'Is this available?',
@@ -847,7 +937,27 @@ void main() {
         (await vendor.loadConversations()).single.buyerUid,
         buyerAccount.id,
       );
+      expect(
+        (await vendor.loadConversations()).single.lastMessageSenderUid,
+        buyerAccount.id,
+      );
       expect(vendorConversation.buyerLabel, 'Buyer Name');
+      final incomingMessage = buyer.watchConversations().firstWhere(
+        (conversations) =>
+            conversations.single.lastMessageSenderUid == vendorAccount.id,
+      );
+      await vendor.sendMessage(
+        conversationId: conversation.id,
+        text: 'Yes, it is available.',
+      );
+      expect(
+        (await incomingMessage).single.lastMessageSenderUid,
+        vendorAccount.id,
+      );
+      expect(
+        (await buyer.loadConversations()).single.lastMessageSenderUid,
+        vendorAccount.id,
+      );
       await buyer.deleteConversationForMe(conversationId: conversation.id);
       expect(await buyer.loadConversations(), isEmpty);
       expect(await vendor.loadConversations(), hasLength(1));

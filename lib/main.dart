@@ -171,13 +171,13 @@ class MarketplaceScreen extends StatefulWidget {
 
 class _MarketplaceScreenState extends State<MarketplaceScreen>
     with WidgetsBindingObserver {
-
   late final MarketplaceRepository _service;
   late final DeviceLocationService _deviceLocationService;
   late final ReverseGeocoder _reverseGeocoder;
   final TextEditingController _searchController = TextEditingController();
   final Set<String> _savedListingIds = {};
   final List<MarketplaceNotification> _notifications = [];
+  final Set<String> _unreadNotificationIds = {};
   List<MarketplaceCartItem> _cartItems = [];
   List<ProduceReservation> _reservations = [];
   final Set<String> _cancellingReservationIds = {};
@@ -185,12 +185,15 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   final Set<String> _deletingBuyerOrderIds = {};
   List<ProduceOrder> _vendorOrders = [];
   List<MarketplaceConversation> _conversations = [];
+  final Map<String, DateTime> _readConversationUpdatedAt = {};
   final Set<String> _deletingConversationIds = {};
   late final StreamSubscription<ProduceListing> _listingSubscription;
   late final StreamSubscription<String> _listingRemovalSubscription;
   late final StreamSubscription<MarketplaceNotification>
   _notificationSubscription;
   late final StreamSubscription<String> _notificationRemovalSubscription;
+  StreamSubscription<MarketplaceNotification>? _vendorNotificationSubscription;
+  StreamSubscription<List<MarketplaceConversation>>? _conversationSubscription;
   List<ProduceListing> _listings = [];
   final Map<String, VendorStoreProfile> _vendorStoreProfiles = {};
   List<ProduceListing> _nearbyListings = [];
@@ -229,6 +232,32 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   MarketplaceAccount? _signedInVendorAccount;
   bool _isGuestBrowsing = false;
   _Section _section = _Section.explore;
+  final DateTime _listingNotificationBaselineAt = DateTime.now();
+
+  int get _unreadNotificationCount =>
+      _signedInRole == null ? 0 : _unreadNotificationIds.length;
+
+  int get _unreadMessageCount {
+    final userId = _signedInUserId;
+    if (userId == null) return 0;
+    return _conversations.where((conversation) {
+      if (conversation.lastMessageSenderUid == null ||
+          conversation.lastMessageSenderUid == userId) {
+        return false;
+      }
+      final readAt = _readConversationUpdatedAt[conversation.id];
+      return readAt == null || conversation.updatedAt.isAfter(readAt);
+    }).length;
+  }
+
+  bool _notificationIsForCurrentAccount(MarketplaceNotification notification) {
+    final role = _signedInRole;
+    if (role == null) return false;
+    return (notification.targetRole == null ||
+            notification.targetRole == role) &&
+        (notification.recipientUid == null ||
+            notification.recipientUid == _signedInUserId);
+  }
 
   @override
   void initState() {
@@ -244,11 +273,34 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         final visibleListing = _signedInRole == null
             ? _service.publicListing(listing)
             : listing;
+        final previousListing = _listings
+            .where((item) => item.id == visibleListing.id)
+            .firstOrNull;
+        final isNewBuyerNotification =
+            _service.supportsRemoteListings &&
+            _signedInRole == 'Buyer' &&
+            visibleListing.justPosted &&
+            visibleListing.postedAt != null &&
+            visibleListing.postedAt!.isAfter(_listingNotificationBaselineAt) &&
+            (previousListing == null ||
+                previousListing.postedAt != visibleListing.postedAt);
         setState(() {
           _listings = [
             visibleListing,
             ..._listings.where((item) => item.id != visibleListing.id),
           ];
+          if (isNewBuyerNotification) {
+            final notification = MarketplaceNotification(
+              id: 'notification-${visibleListing.id}-${visibleListing.postedAt!.microsecondsSinceEpoch}',
+              listing: visibleListing,
+              targetRole: 'Buyer',
+              createdAt: visibleListing.postedAt!,
+            );
+            if (!_notifications.any((item) => item.id == notification.id)) {
+              _notifications.insert(0, notification);
+              _unreadNotificationIds.add(notification.id);
+            }
+          }
         });
         unawaited(_loadVendorStoreProfiles([visibleListing]));
       },
@@ -266,23 +318,18 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         _listings.removeWhere((listing) => listing.id == listingId);
         _nearbyListings.removeWhere((listing) => listing.id == listingId);
         _notifications.removeWhere(
-          (notification) => notification.listing.id == listingId,
+          (notification) => notification.listing?.id == listingId,
+        );
+        _unreadNotificationIds.removeWhere(
+          (notificationId) => !_notifications.any(
+            (notification) => notification.id == notificationId,
+          ),
         );
       });
     });
-    _notificationSubscription = _service.notificationUpdates.listen((
-      notification,
-    ) {
-      if (!mounted) return;
-      setState(() => _notifications.insert(0, notification));
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text('${notification.title}: ${notification.message}'),
-          ),
-        );
-    });
+    _notificationSubscription = _service.notificationUpdates.listen(
+      _receiveNotification,
+    );
     _notificationRemovalSubscription = _service.notificationRemovals.listen((
       notificationId,
     ) {
@@ -291,6 +338,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         _notifications.removeWhere(
           (notification) => notification.id == notificationId,
         );
+        _unreadNotificationIds.remove(notificationId);
       });
     });
     _initialize();
@@ -310,6 +358,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     _listingRemovalSubscription.cancel();
     _notificationSubscription.cancel();
     _notificationRemovalSubscription.cancel();
+    _vendorNotificationSubscription?.cancel();
+    _conversationSubscription?.cancel();
     _searchController.dispose();
     _service.dispose();
     super.dispose();
@@ -330,15 +380,26 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
             _vendorVerificationStatus = 'not_requested';
           }
         });
+        if (account.role == 'Vendor') _watchVendorNotifications();
       }
       await _loadListings();
       if (account != null && account.role == 'Buyer') {
-        await _loadBuyerData();
+        try {
+          await _loadBuyerData();
+        } catch (error) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not load your account data: $error')),
+          );
+        }
       } else if (account != null && account.role == 'Vendor') {
         await _loadVendorOrders();
         await _loadVendorVerificationStatus();
       }
-      if (account != null) await _loadConversations();
+      if (account != null) {
+        await _loadConversations();
+        _watchConversations();
+      }
     } on MarketplaceApiException catch (error) {
       if (!mounted) return;
       setState(() {
@@ -353,19 +414,14 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       _isLoading = true;
       _loadError = null;
     });
+    late final List<ProduceListing> listings;
     try {
-      final listings = _signedInRole == null
+      listings = _signedInRole == null
           ? await _service.loadPublicListings()
           : await _service.loadListings();
-      final notifications = _signedInRole == null
-          ? <MarketplaceNotification>[]
-          : await _service.loadNotifications();
       if (!mounted) return;
       setState(() {
         _listings = listings;
-        _notifications
-          ..clear()
-          ..addAll(notifications);
         _isLoading = false;
       });
       unawaited(_loadVendorStoreProfiles(listings));
@@ -375,6 +431,29 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         _loadError = error;
         _isLoading = false;
       });
+      return;
+    }
+
+    if (_signedInRole == null) return;
+    try {
+      final notifications = await _service.loadNotifications();
+      if (!mounted) return;
+      setState(() {
+        for (final notification in notifications) {
+          if (!_notifications.any((item) => item.id == notification.id)) {
+            _notifications.add(notification);
+          }
+          _unreadNotificationIds.add(notification.id);
+        }
+        _notifications.sort(
+          (first, second) => second.createdAt.compareTo(first.createdAt),
+        );
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load notifications: $error')),
+      );
     }
   }
 
@@ -592,25 +671,43 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     if (section == _Section.messages) {
       await _loadConversations();
     }
-    setState(() => _section = section);
-    if (section == _Section.profile && _signedInRole == 'Vendor') {
-      await _loadVendorOrders();
-    }
     if (section == _Section.Notification && _signedInRole != null) {
+      final notificationUserId = _signedInUserId;
       try {
         final notifications = await _service.loadNotifications();
-        if (!mounted) return;
+        await _service.markNotificationsRead();
+        if (!mounted || _signedInUserId != notificationUserId) return;
         setState(() {
-          _notifications
-            ..clear()
-            ..addAll(notifications);
+          _section = section;
+          for (final notification in notifications) {
+            if (!_notifications.any((item) => item.id == notification.id)) {
+              _notifications.add(notification);
+            }
+          }
+          _notifications.sort(
+            (first, second) => second.createdAt.compareTo(first.createdAt),
+          );
+          _unreadNotificationIds.clear();
         });
       } on MarketplaceApiException catch (error) {
-        if (!mounted) return;
+        if (!mounted || _signedInUserId != notificationUserId) return;
+        setState(() => _section = section);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not refresh Notification: $error')),
+          SnackBar(content: Text('Could not refresh notifications: $error')),
         );
       }
+      return;
+    }
+    setState(() {
+      _section = section;
+      if (section == _Section.messages) {
+        for (final conversation in _conversations) {
+          _readConversationUpdatedAt[conversation.id] = conversation.updatedAt;
+        }
+      }
+    });
+    if (section == _Section.profile && _signedInRole == 'Vendor') {
+      await _loadVendorOrders();
     }
   }
 
@@ -641,6 +738,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         _section = _Section.explore;
       }
     });
+    if (account.role == 'Vendor') _watchVendorNotifications();
     if (account.role == 'Vendor') {
       await _loadVendorVerificationStatus();
     }
@@ -672,6 +770,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         ),
       );
     }
+    if (mounted) _watchConversations();
     if (mounted && accountDataLoaded) {
       ScaffoldMessenger.of(
         context,
@@ -845,8 +944,96 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       if (!mounted) return;
       setState(() {
         _conversations = conversations;
+        if (_section == _Section.messages) {
+          for (final conversation in conversations) {
+            _readConversationUpdatedAt[conversation.id] =
+                conversation.updatedAt;
+          }
+        }
         _isLoadingMessages = false;
       });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _messagesError = error;
+        _isLoadingMessages = false;
+      });
+    }
+  }
+
+  void _receiveNotification(MarketplaceNotification notification) {
+    if (!mounted || !_notificationIsForCurrentAccount(notification)) return;
+    final isNew = !_notifications.any((item) => item.id == notification.id);
+    setState(() {
+      if (isNew) _notifications.insert(0, notification);
+      if (isNew) _unreadNotificationIds.add(notification.id);
+    });
+    if (isNew) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text('${notification.title}: ${notification.message}'),
+          ),
+        );
+    }
+  }
+
+  void _watchVendorNotifications() {
+    _vendorNotificationSubscription?.cancel();
+    if (!_service.supportsRemoteListings || _signedInRole != 'Vendor') return;
+    try {
+      _vendorNotificationSubscription = _service
+          .watchVendorNotifications()
+          .listen(
+            _receiveNotification,
+            onError: (Object error, StackTrace stackTrace) {
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Could not monitor vendor notifications: $error',
+                  ),
+                ),
+              );
+            },
+          );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not monitor vendor notifications: $error'),
+        ),
+      );
+    }
+  }
+
+  void _watchConversations() {
+    _conversationSubscription?.cancel();
+    try {
+      _conversationSubscription = _service.watchConversations().listen(
+        (conversations) {
+          if (!mounted) return;
+          setState(() {
+            _conversations = conversations;
+            _messagesError = null;
+            _isLoadingMessages = false;
+            if (_section == _Section.messages) {
+              for (final conversation in conversations) {
+                _readConversationUpdatedAt[conversation.id] =
+                    conversation.updatedAt;
+              }
+            }
+          });
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!mounted) return;
+          setState(() {
+            _messagesError = error;
+            _isLoadingMessages = false;
+          });
+        },
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -1064,6 +1251,10 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
 
   Future<void> _signOut() async {
     final signOut = _service.signOut();
+    _conversationSubscription?.cancel();
+    _conversationSubscription = null;
+    _vendorNotificationSubscription?.cancel();
+    _vendorNotificationSubscription = null;
     setState(() {
       _signedInRole = null;
       _signedInEmail = null;
@@ -1071,6 +1262,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       _signedInAccount = null;
       _signedInVendorAccount = null;
       _isGuestBrowsing = false;
+      _notifications.clear();
       _cartItems = [];
       _reservations = [];
       _cancellingReservationIds.clear();
@@ -1078,6 +1270,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       _deletingBuyerOrderIds.clear();
       _vendorOrders = [];
       _conversations = [];
+      _readConversationUpdatedAt.clear();
+      _unreadNotificationIds.clear();
       _vendorOrdersError = null;
       _isLoadingVendorOrders = false;
       _savedListingIds.clear();
@@ -1441,21 +1635,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         SnackBar(content: Text('Could not repost listing: $error')),
       );
     }
-  }
-
-  void _showNotification() {
-    if (_notifications.isNotEmpty) {
-      final notification = _notifications.first;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${notification.title}: ${notification.message}'),
-        ),
-      );
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('No new neighborhood notifications yet.')),
-    );
   }
 
   Future<void> _showListingDetails(ProduceListing listing) async {
@@ -2016,7 +2195,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
                 (sum, item) => sum + item.quantity,
               ),
               onOpenCart: () => _setSection(_Section.cart),
-              onNotifications: _showNotification,
               onPostProduce: _showNewListingForm,
               onSignIn: _signedInRole == null
                   ? () => _showSignIn()
@@ -2067,13 +2245,21 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         selectedIcon: Icon(Icons.shopping_cart),
         label: 'Cart',
       ),
-      _Section.messages => const NavigationDestination(
-        icon: Icon(Icons.forum_outlined),
+      _Section.messages => NavigationDestination(
+        icon: Badge(
+          isLabelVisible: _unreadMessageCount > 0,
+          label: Text('$_unreadMessageCount'),
+          child: const Icon(Icons.forum_outlined),
+        ),
         selectedIcon: Icon(Icons.forum),
         label: 'Messages',
       ),
-      _Section.Notification => const NavigationDestination(
-        icon: Icon(Icons.notifications_none),
+      _Section.Notification => NavigationDestination(
+        icon: Badge(
+          isLabelVisible: _unreadNotificationCount > 0,
+          label: Text('$_unreadNotificationCount'),
+          child: const Icon(Icons.notifications_none),
+        ),
         selectedIcon: Icon(Icons.notifications),
         label: 'Notification',
       ),
@@ -2099,7 +2285,14 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     if (_section == _Section.Notification) {
       return _NotificationPage(
         notifications: _notifications,
-        onOpenListing: _showListingDetails,
+        onOpenNotification: (notification) {
+          final listing = notification.listing;
+          if (listing != null) {
+            unawaited(_showListingDetails(listing));
+          } else if (_signedInRole == 'Vendor') {
+            unawaited(_setSection(_Section.profile));
+          }
+        },
       );
     }
     if (_section == _Section.messages) {
@@ -2659,7 +2852,6 @@ class _MarketplaceHeader extends StatelessWidget {
     required this.signedInAccount,
     required this.cartItemCount,
     required this.onOpenCart,
-    required this.onNotifications,
     required this.onPostProduce,
     required this.onSignIn,
   });
@@ -2672,7 +2864,6 @@ class _MarketplaceHeader extends StatelessWidget {
   final MarketplaceAccount? signedInAccount;
   final int cartItemCount;
   final VoidCallback onOpenCart;
-  final VoidCallback onNotifications;
   final VoidCallback onPostProduce;
   final VoidCallback onSignIn;
 
@@ -2749,12 +2940,6 @@ class _MarketplaceHeader extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                   ],
-                  IconButton(
-                    tooltip: 'Notifications',
-                    onPressed: onNotifications,
-                    icon: const Icon(Icons.notifications_none_outlined),
-                  ),
-                  const SizedBox(width: 8),
                 ],
                 if (isVendor) ...[
                   if (!compact)
@@ -2781,9 +2966,7 @@ class _MarketplaceHeader extends StatelessWidget {
                         radius: 23,
                         photoUrl: signedInAccount?.profilePhotoUrl,
                         photoBytes: signedInAccount?.profilePhotoBytes,
-                        placeholderText: signedInRole == 'Vendor'
-                            ? 'VE'
-                            : 'BY',
+                        placeholderText: signedInRole == 'Vendor' ? 'VE' : 'BY',
                       ),
                     ),
                   ),
@@ -6021,11 +6204,11 @@ class _ForgotPasswordDialogState extends State<_ForgotPasswordDialog> {
 class _NotificationPage extends StatelessWidget {
   const _NotificationPage({
     required this.notifications,
-    required this.onOpenListing,
+    required this.onOpenNotification,
   });
 
   final List<MarketplaceNotification> notifications;
-  final ValueChanged<ProduceListing> onOpenListing;
+  final ValueChanged<MarketplaceNotification> onOpenNotification;
 
   @override
   Widget build(BuildContext context) {
@@ -6038,7 +6221,7 @@ class _NotificationPage extends StatelessWidget {
             const _SectionHeadingText(
               eyebrow: 'YOUR NEIGHBORHOOD',
               title: 'Notification',
-              subtitle: 'Fresh updates from local vendors.',
+              subtitle: 'New listings and marketplace activity.',
             ),
             const SizedBox(height: 22),
             if (notifications.isNotEmpty)
@@ -6053,9 +6236,16 @@ class _NotificationPage extends StatelessWidget {
                   ),
                   child: ListTile(
                     contentPadding: const EdgeInsets.all(16),
-                    leading: const CircleAvatar(
-                      backgroundColor: Color(0xFFE9EFE5),
-                      child: Icon(Icons.eco_outlined, color: _forest),
+                    leading: CircleAvatar(
+                      backgroundColor: const Color(0xFFE9EFE5),
+                      child: Icon(switch (notification.type) {
+                        MarketplaceNotificationType.listing =>
+                          Icons.eco_outlined,
+                        MarketplaceNotificationType.purchase =>
+                          Icons.shopping_bag_outlined,
+                        MarketplaceNotificationType.reservation =>
+                          Icons.event_available_outlined,
+                      }, color: _forest),
                     ),
                     title: Text(
                       notification.title,
@@ -6067,14 +6257,16 @@ class _NotificationPage extends StatelessWidget {
                         '${notification.message} · ${notification.timeLabel}',
                       ),
                     ),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () => onOpenListing(notification.listing),
+                    trailing: notification.listing == null
+                        ? null
+                        : const Icon(Icons.chevron_right),
+                    onTap: () => onOpenNotification(notification),
                   ),
                 ),
               )
             else
               const Text(
-                'You’re all caught up. Check back for fresh listings.',
+                'You’re all caught up. New listings and marketplace activity will appear here.',
               ),
           ],
         ),

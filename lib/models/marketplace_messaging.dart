@@ -11,6 +11,7 @@ class MarketplaceConversation {
     required this.vendorLabel,
     required this.updatedAt,
     this.lastMessage = '',
+    this.lastMessageSenderUid,
     this.buyerPhotoUrl,
     this.vendorPhotoUrl,
     this.buyerPhotoBytes,
@@ -27,6 +28,7 @@ class MarketplaceConversation {
   final String vendorLabel;
   final DateTime updatedAt;
   final String lastMessage;
+  final String? lastMessageSenderUid;
   final String? buyerPhotoUrl;
   final String? vendorPhotoUrl;
   final Uint8List? buyerPhotoBytes;

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -43,6 +44,13 @@ class _VendorRoleRepository extends InMemoryMarketplaceRepository {
   }
 
   @override
+  Future<List<MarketplaceNotification>> loadNotifications() async => [];
+
+  @override
+  Stream<MarketplaceNotification> watchVendorNotifications() =>
+      const Stream.empty();
+
+  @override
   Future<List<ProduceOrder>> loadVendorOrders() async => [
     ProduceOrder(
       id: 'vendor-order-1',
@@ -70,6 +78,38 @@ class _VendorRoleRepository extends InMemoryMarketplaceRepository {
       totalAmount: 80,
     ),
   ];
+}
+
+class _NotificationFailureRepository extends InMemoryMarketplaceRepository {
+  @override
+  Future<List<MarketplaceNotification>> loadNotifications() async {
+    throw const MarketplaceApiException('Notification service unavailable.');
+  }
+}
+
+class _LiveVendorNotificationRepository extends InMemoryMarketplaceRepository {
+  final StreamController<MarketplaceNotification> _notifications =
+      StreamController<MarketplaceNotification>.broadcast();
+
+  @override
+  bool get supportsRemoteListings => true;
+
+  @override
+  Future<List<MarketplaceNotification>> loadNotifications() async => [];
+
+  @override
+  Stream<MarketplaceNotification> watchVendorNotifications() =>
+      _notifications.stream;
+
+  void addNotification(MarketplaceNotification notification) {
+    _notifications.add(notification);
+  }
+
+  @override
+  void dispose() {
+    _notifications.close();
+    super.dispose();
+  }
 }
 
 class _ImageListingRepository extends InMemoryMarketplaceRepository {
@@ -171,6 +211,13 @@ class _NonOwnerVendorRepository extends InMemoryMarketplaceRepository {
       companyName: 'Current vendor',
     );
   }
+
+  @override
+  Future<List<MarketplaceNotification>> loadNotifications() async => [];
+
+  @override
+  Stream<MarketplaceNotification> watchVendorNotifications() =>
+      const Stream.empty();
 
   @override
   Future<List<ProduceListing>> loadListings() async => [listing];
@@ -326,67 +373,69 @@ void main() {
     expect(deleteTapped, isTrue);
   });
 
-  testWidgets('chat header omits listing category and shows participant email', (
-    tester,
-  ) async {
-    final repository = InMemoryMarketplaceRepository()
-      ..setAuthenticatedAccount(
-        const MarketplaceAccount(
-          id: 'buyer',
-          role: 'Buyer',
-          email: 'buyer@example.com',
-        ),
+  testWidgets(
+    'chat header omits listing category and shows participant email',
+    (tester) async {
+      final repository = InMemoryMarketplaceRepository()
+        ..setAuthenticatedAccount(
+          const MarketplaceAccount(
+            id: 'buyer',
+            role: 'Buyer',
+            email: 'buyer@example.com',
+          ),
+        );
+      addTearDown(repository.dispose);
+      final conversation = MarketplaceConversation(
+        id: 'pair:buyer:vendor',
+        listingId: 'listing-1',
+        listingName: 'Vegetables',
+        buyerUid: 'buyer',
+        vendorUid: 'vendor',
+        buyerLabel: 'Buyer Name',
+        vendorLabel: 'vendor@example.com',
+        updatedAt: DateTime(2026),
       );
-    addTearDown(repository.dispose);
-    final conversation = MarketplaceConversation(
-      id: 'pair:buyer:vendor',
-      listingId: 'listing-1',
-      listingName: 'Vegetables',
-      buyerUid: 'buyer',
-      vendorUid: 'vendor',
-      buyerLabel: 'Buyer Name',
-      vendorLabel: 'vendor@example.com',
-      updatedAt: DateTime(2026),
-    );
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: MarketplaceConversationDialog(
-            repository: repository,
-            conversation: conversation,
-            currentUserId: 'buyer',
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MarketplaceConversationDialog(
+              repository: repository,
+              conversation: conversation,
+              currentUserId: 'buyer',
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('vendor@example.com'), findsOneWidget);
-    expect(find.text('Vegetables'), findsNothing);
-  });
-
-  testWidgets('unverified accounts still open the marketplace without email checks', (
-    tester,
-  ) async {
-    final repository = InMemoryMarketplaceRepository()
-      ..setAuthenticatedAccount(
-        const MarketplaceAccount(
-          id: 'unverified-buyer',
-          role: 'Buyer',
-          email: 'unverified@example.com',
-          emailVerified: false,
-        ),
       );
-    addTearDown(repository.dispose);
+      await tester.pumpAndSettle();
 
-    await tester.pumpWidget(MyApp(repository: repository));
-    await tester.pumpAndSettle();
+      expect(find.text('vendor@example.com'), findsOneWidget);
+      expect(find.text('Vegetables'), findsNothing);
+    },
+  );
 
-    expect(find.text('Verify your email address'), findsNothing);
-    expect(find.textContaining('unverified@example.com'), findsNothing);
-    expect(find.byType(Scaffold), findsWidgets);
-  });
+  testWidgets(
+    'unverified accounts still open the marketplace without email checks',
+    (tester) async {
+      final repository = InMemoryMarketplaceRepository()
+        ..setAuthenticatedAccount(
+          const MarketplaceAccount(
+            id: 'unverified-buyer',
+            role: 'Buyer',
+            email: 'unverified@example.com',
+            emailVerified: false,
+          ),
+        );
+      addTearDown(repository.dispose);
+
+      await tester.pumpWidget(MyApp(repository: repository));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Verify your email address'), findsNothing);
+      expect(find.textContaining('unverified@example.com'), findsNothing);
+      expect(find.byType(Scaffold), findsWidgets);
+    },
+  );
 
   test('verification resend requests are rate-limited once per minute', () {
     final now = DateTime(2024, 1, 1, 12, 0, 0);
@@ -401,7 +450,10 @@ void main() {
       MarketplaceScreen.isVerificationEmailResendAllowed(stale, now: now),
       isTrue,
     );
-    expect(MarketplaceScreen.isVerificationEmailResendAllowed(null, now: now), isTrue);
+    expect(
+      MarketplaceScreen.isVerificationEmailResendAllowed(null, now: now),
+      isTrue,
+    );
   });
 
   testWidgets('verified email status is shown in the account profile', (
@@ -765,6 +817,97 @@ void main() {
     expect(find.text('Fresh Tomatoes'), findsWidgets);
     expect(find.text('Crisp Pechay'), findsOneWidget);
     expect(find.text('Ripe Carabao Mangoes'), findsNothing);
+  });
+
+  testWidgets('notification loading failure does not hide market listings', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 2200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final repository = _NotificationFailureRepository();
+    addTearDown(repository.dispose);
+    await repository.register(
+      const MarketplaceCredentials(
+        email: 'notifications-unavailable@example.test',
+        password: 'local-password',
+        role: 'Buyer',
+      ),
+    );
+    await tester.pumpWidget(MyApp(repository: repository));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Fresh Tomatoes'), findsWidgets);
+    expect(find.text('We couldn’t load the market listings.'), findsNothing);
+    expect(find.textContaining('Could not load notifications'), findsOneWidget);
+  });
+
+  testWidgets('vendor purchase notification displays the red count badge', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(700, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final repository = _LiveVendorNotificationRepository();
+    addTearDown(repository.dispose);
+    repository.setAuthenticatedAccount(
+      const MarketplaceAccount(
+        id: 'vendor-notification-uid',
+        role: 'Vendor',
+        email: 'vendor-notification@example.test',
+      ),
+    );
+    await tester.pumpWidget(MyApp(repository: repository));
+    await tester.pumpAndSettle();
+
+    repository.addNotification(
+      MarketplaceNotification(
+        id: 'new-vendor-purchase',
+        type: MarketplaceNotificationType.purchase,
+        listing: const ProduceListing(
+          id: 'vendor-notification-listing',
+          name: 'Fresh Okra',
+          category: 'Vegetables',
+          price: 42,
+          unit: 'kg',
+          quantity: '5',
+          condition: 'Fresh',
+          vendor: 'Green Basket',
+          vendorInitials: 'GB',
+          location: 'Market Road',
+          imageUrl: '',
+        ),
+        recipientUid: 'vendor-notification-uid',
+        targetRole: 'Vendor',
+        createdAt: DateTime.now(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final notificationDestination = find.ancestor(
+      of: find.text('Notification'),
+      matching: find.byType(NavigationDestination),
+    );
+    expect(notificationDestination, findsOneWidget);
+    expect(
+      tester
+          .widget<Badge>(
+            find.descendant(
+              of: notificationDestination,
+              matching: find.byType(Badge),
+            ),
+          )
+          .isLabelVisible,
+      isTrue,
+    );
+    expect(
+      find.descendant(of: notificationDestination, matching: find.text('1')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('produce cards display image bytes from Firestore', (
@@ -1641,7 +1784,7 @@ void main() {
       service.notificationUpdates,
       emits(
         isA<MarketplaceNotification>().having(
-          (notification) => notification.listing.id,
+          (notification) => notification.listing!.id,
           'listing id',
           listing.id,
         ),
@@ -1657,7 +1800,7 @@ void main() {
     expect(savedListings.first.imageBytes, listing.imageBytes);
     expect(savedListings.first.imageFileName, 'squash.png');
     expect(publicListings.first.ownerEmail, isNull);
-    expect(Notification.first.listing.id, listing.id);
+    expect(Notification.first.listing!.id, listing.id);
   });
 
   test('reserving and buying produce decrement available inventory', () async {
@@ -1765,7 +1908,7 @@ void main() {
     );
     expect(
       (await service.loadNotifications()).any(
-        (item) => item.listing.id == listing.id,
+        (item) => item.listing?.id == listing.id,
       ),
       isFalse,
     );

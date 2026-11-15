@@ -5,30 +5,73 @@ import '../models/marketplace_messaging.dart';
 import '../models/marketplace_purchase.dart';
 import '../models/produce_listing.dart';
 
+enum MarketplaceNotificationType { listing, purchase, reservation }
+
 class MarketplaceNotification {
   const MarketplaceNotification({
     required this.id,
-    required this.listing,
     required this.createdAt,
+    this.type = MarketplaceNotificationType.listing,
+    this.listing,
+    this.buyerName,
+    this.quantity,
+    this.total,
+    this.recipientUid,
+    this.targetRole,
   });
 
   factory MarketplaceNotification.fromJson(Map<String, dynamic> json) =>
       MarketplaceNotification(
         id: json['id'].toString(),
-        listing: ProduceListing.fromJson(
-          json['listing'] as Map<String, dynamic>,
+        type: MarketplaceNotificationType.values.firstWhere(
+          (type) => type.name == json['type'],
+          orElse: () => MarketplaceNotificationType.listing,
         ),
+        listing: json['listing'] is Map
+            ? ProduceListing.fromJson(
+                Map<String, dynamic>.from(json['listing'] as Map),
+              )
+            : null,
         createdAt: DateTime.parse(json['created_at'] as String),
+        buyerName: json['buyer_name'] as String?,
+        quantity: (json['quantity'] as num?)?.toInt(),
+        total: (json['total'] as num?)?.toInt(),
+        recipientUid: json['recipient_uid'] as String?,
+        targetRole: json['target_role'] as String?,
       );
 
   final String id;
-  final ProduceListing listing;
   final DateTime createdAt;
+  final MarketplaceNotificationType type;
+  final ProduceListing? listing;
+  final String? buyerName;
+  final int? quantity;
+  final int? total;
+  final String? recipientUid;
+  final String? targetRole;
 
-  String get title => 'Fresh produce just posted';
+  String get title => switch (type) {
+    MarketplaceNotificationType.listing => 'Fresh produce just posted',
+    MarketplaceNotificationType.purchase => 'New purchase',
+    MarketplaceNotificationType.reservation => 'New reservation',
+  };
 
-  String get message =>
-      '${listing.name} · ${listing.priceLabel}/${listing.unit} · ${listing.vendor}';
+  String get message {
+    final produce = listing;
+    if (type == MarketplaceNotificationType.listing) {
+      if (produce == null) return 'A vendor posted a new listing.';
+      return '${produce.name} · ${produce.priceLabel}/${produce.unit} · ${produce.vendor}';
+    }
+    if (produce == null) return 'A buyer placed an order.';
+    final action = type == MarketplaceNotificationType.purchase
+        ? 'purchased'
+        : 'reserved';
+    final buyer = buyerName?.trim();
+    final buyerText = buyer == null || buyer.isEmpty ? 'A buyer' : buyer;
+    final count = quantity ?? 1;
+    final amount = total == null ? '' : ' · Total ₱$total';
+    return '$buyerText $action $count ${produce.unit} of ${produce.name}$amount';
+  }
 
   String get timeLabel {
     final localTime = createdAt.toLocal();
@@ -143,6 +186,7 @@ class MarketplaceService {
   ];
 
   static final List<MarketplaceNotification> _notifications = [];
+  static final Map<String, DateTime> _notificationReadAt = {};
   static final Map<String, int> _remainingInventory = {};
   static final Map<String, Map<String, int>> _buyerCarts = {};
   static final List<ProduceReservation> _reservations = [];
@@ -150,6 +194,8 @@ class MarketplaceService {
   static final Set<String> _hiddenBuyerOrders = {};
   static final Map<String, String> _vendorOrderStatuses = {};
   static final Map<String, MarketplaceConversation> _conversations = {};
+  static final Map<String, StreamController<List<MarketplaceConversation>>>
+  _conversationControllers = {};
   static final Map<String, List<MarketplaceMessage>> _messages = {};
   static final Map<String, Set<String>> _hiddenMessages = {};
   static final Map<String, StreamController<List<MarketplaceMessage>>>
@@ -215,6 +261,28 @@ class MarketplaceService {
   Future<List<MarketplaceNotification>> loadNotifications() async =>
       List<MarketplaceNotification>.unmodifiable(_notifications);
 
+  List<MarketplaceNotification> notificationsFor({
+    required String userId,
+    required String role,
+  }) {
+    final readAt =
+        _notificationReadAt[userId] ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final notifications =
+        _notifications.where((notification) {
+          return notification.targetRole == role &&
+              (notification.recipientUid == null ||
+                  notification.recipientUid == userId) &&
+              notification.createdAt.isAfter(readAt);
+        }).toList()..sort(
+          (first, second) => second.createdAt.compareTo(first.createdAt),
+        );
+    return List.unmodifiable(notifications);
+  }
+
+  void markNotificationsRead(String userId) {
+    _notificationReadAt[userId] = DateTime.now();
+  }
+
   Future<void> addListing(ProduceListing listing) async {
     _sampleListings.insert(0, listing);
     _remainingInventory[listing.id] = _parseInventory(listing.quantity);
@@ -224,6 +292,7 @@ class MarketplaceService {
       id: 'notification-${listing.id}',
       listing: listing,
       createdAt: DateTime.now(),
+      targetRole: 'Buyer',
     );
     _notifications.insert(0, notification);
     _notificationController.add(notification);
@@ -306,11 +375,11 @@ class MarketplaceService {
     _listingRemovalController.add(listingId);
 
     final notificationIds = _notifications
-        .where((notification) => notification.listing.id == listingId)
+        .where((notification) => notification.listing?.id == listingId)
         .map((notification) => notification.id)
         .toList();
     _notifications.removeWhere(
-      (notification) => notification.listing.id == listingId,
+      (notification) => notification.listing?.id == listingId,
     );
     for (final notificationId in notificationIds) {
       _notificationRemovalController.add(notificationId);
@@ -390,6 +459,15 @@ class MarketplaceService {
       createdAt: DateTime.now(),
     );
     _reservations.insert(0, reservation);
+    _notifyVendorActivity(
+      id: reservation.id,
+      type: MarketplaceNotificationType.reservation,
+      listing: listing,
+      buyerName: buyerEmail,
+      quantity: quantity,
+      total: listing.price * quantity,
+      createdAt: reservation.createdAt,
+    );
     return reservation;
   }
 
@@ -415,6 +493,15 @@ class MarketplaceService {
       status: 'pending_vendor_confirmation',
     );
     _orders.insert(0, order);
+    _notifyVendorActivity(
+      id: order.id,
+      type: MarketplaceNotificationType.purchase,
+      listing: listing,
+      buyerName: buyerEmail,
+      quantity: quantity,
+      total: order.total,
+      createdAt: order.createdAt,
+    );
     return order;
   }
 
@@ -454,8 +541,45 @@ class MarketplaceService {
       status: 'pending_vendor_confirmation',
     );
     _orders.insert(0, order);
+    for (final item in order.items) {
+      _notifyVendorActivity(
+        id: '${order.id}-${item.listing.id}',
+        type: MarketplaceNotificationType.purchase,
+        listing: item.listing,
+        buyerName: buyerEmail,
+        quantity: item.quantity,
+        total: item.subtotal,
+        createdAt: order.createdAt,
+      );
+    }
     cart.clear();
     return order;
+  }
+
+  void _notifyVendorActivity({
+    required String id,
+    required MarketplaceNotificationType type,
+    required ProduceListing listing,
+    required String buyerName,
+    required int quantity,
+    required int total,
+    required DateTime createdAt,
+  }) {
+    final vendorId = listing.ownerUid ?? listing.ownerEmail;
+    if (vendorId == null || vendorId.isEmpty) return;
+    final notification = MarketplaceNotification(
+      id: 'notification-$id',
+      type: type,
+      listing: listing,
+      buyerName: buyerName,
+      quantity: quantity,
+      total: total,
+      recipientUid: vendorId,
+      targetRole: 'Vendor',
+      createdAt: createdAt,
+    );
+    _notifications.insert(0, notification);
+    _notificationController.add(notification);
   }
 
   List<ProduceReservation> reservationsFor(String buyerEmail) =>
@@ -579,6 +703,7 @@ class MarketplaceService {
     final existing = _conversations[conversation.id];
     if (existing == null) {
       _conversations[conversation.id] = conversation;
+      _notifyConversationUpdate(conversation);
       return conversation;
     }
     final updated = MarketplaceConversation(
@@ -591,6 +716,7 @@ class MarketplaceService {
       vendorLabel: conversation.vendorLabel,
       updatedAt: conversation.updatedAt,
       lastMessage: existing.lastMessage,
+      lastMessageSenderUid: existing.lastMessageSenderUid,
       buyerPhotoUrl: conversation.buyerPhotoUrl ?? existing.buyerPhotoUrl,
       vendorPhotoUrl: conversation.vendorPhotoUrl ?? existing.vendorPhotoUrl,
       buyerPhotoBytes: conversation.buyerPhotoBytes ?? existing.buyerPhotoBytes,
@@ -599,6 +725,7 @@ class MarketplaceService {
       hiddenBy: conversation.hiddenBy,
     );
     _conversations[conversation.id] = updated;
+    _notifyConversationUpdate(updated);
     return updated;
   }
 
@@ -642,16 +769,21 @@ class MarketplaceService {
         hiddenBy: [...conversation.hiddenBy, userId],
       );
     }
+    _notifyConversationUpdate(target);
     return true;
   }
 
-  void updateProfilePhotoForUser(String userId, Uint8List imageBytes) {
+  void updateProfilePhotoForUser(
+    String userId, {
+    required String? photoUrl,
+    required Uint8List? photoBytes,
+  }) {
     for (final entry in _conversations.entries.toList()) {
       final conversation = entry.value;
       if (conversation.buyerUid != userId && conversation.vendorUid != userId) {
         continue;
       }
-      _conversations[entry.key] = MarketplaceConversation(
+      final updatedConversation = MarketplaceConversation(
         id: conversation.id,
         listingId: conversation.listingId,
         listingName: conversation.listingName,
@@ -661,16 +793,23 @@ class MarketplaceService {
         vendorLabel: conversation.vendorLabel,
         updatedAt: conversation.updatedAt,
         lastMessage: conversation.lastMessage,
-        buyerPhotoUrl: conversation.buyerPhotoUrl,
-        vendorPhotoUrl: conversation.vendorPhotoUrl,
+        lastMessageSenderUid: conversation.lastMessageSenderUid,
+        buyerPhotoUrl: conversation.buyerUid == userId
+            ? photoUrl
+            : conversation.buyerPhotoUrl,
+        vendorPhotoUrl: conversation.vendorUid == userId
+            ? photoUrl
+            : conversation.vendorPhotoUrl,
         buyerPhotoBytes: conversation.buyerUid == userId
-            ? imageBytes
+            ? photoBytes
             : conversation.buyerPhotoBytes,
         vendorPhotoBytes: conversation.vendorUid == userId
-            ? imageBytes
+            ? photoBytes
             : conversation.vendorPhotoBytes,
         hiddenBy: conversation.hiddenBy,
       );
+      _conversations[entry.key] = updatedConversation;
+      _notifyConversationUpdate(updatedConversation);
     }
   }
 
@@ -691,6 +830,25 @@ class MarketplaceService {
         .where((conversation) => !conversation.hiddenBy.contains(userId))
         .toList()
       ..sort((first, second) => second.updatedAt.compareTo(first.updatedAt));
+  }
+
+  Stream<List<MarketplaceConversation>> watchConversations(String userId) {
+    final controller = _conversationControllers.putIfAbsent(
+      userId,
+      () => StreamController<List<MarketplaceConversation>>.broadcast(),
+    );
+    scheduleMicrotask(
+      () => controller.add(List.unmodifiable(conversationsFor(userId))),
+    );
+    return controller.stream;
+  }
+
+  void _notifyConversationUpdate(MarketplaceConversation conversation) {
+    for (final userId in [conversation.buyerUid, conversation.vendorUid]) {
+      _conversationControllers[userId]?.add(
+        List.unmodifiable(conversationsFor(userId)),
+      );
+    }
   }
 
   Stream<List<MarketplaceMessage>> watchMessages(
@@ -715,7 +873,7 @@ class MarketplaceService {
     _messages.putIfAbsent(conversationId, () => []).add(message);
     final conversation = _conversations[conversationId];
     if (conversation != null) {
-      _conversations[conversationId] = MarketplaceConversation(
+      final updatedConversation = MarketplaceConversation(
         id: conversation.id,
         listingId: conversation.listingId,
         listingName: conversation.listingName,
@@ -725,12 +883,15 @@ class MarketplaceService {
         vendorLabel: conversation.vendorLabel,
         updatedAt: message.createdAt,
         lastMessage: message.text.isEmpty ? 'Photo' : message.text,
+        lastMessageSenderUid: message.senderUid,
         buyerPhotoUrl: conversation.buyerPhotoUrl,
         vendorPhotoUrl: conversation.vendorPhotoUrl,
         buyerPhotoBytes: conversation.buyerPhotoBytes,
         vendorPhotoBytes: conversation.vendorPhotoBytes,
         hiddenBy: conversation.hiddenBy,
       );
+      _conversations[conversationId] = updatedConversation;
+      _notifyConversationUpdate(updatedConversation);
     }
     _messageControllers[conversationId]?.add(
       _visibleMessages(conversationId, userId),
@@ -788,6 +949,7 @@ class MarketplaceService {
     vendorLabel: conversation.vendorLabel,
     updatedAt: conversation.updatedAt,
     lastMessage: conversation.lastMessage,
+    lastMessageSenderUid: conversation.lastMessageSenderUid,
     buyerPhotoUrl: conversation.buyerPhotoUrl,
     vendorPhotoUrl: conversation.vendorPhotoUrl,
     buyerPhotoBytes: conversation.buyerPhotoBytes,

@@ -167,6 +167,8 @@ abstract interface class MarketplaceRepository implements ReverseGeocoder {
   Future<MarketplaceAccount> updateProfilePhotoUrl({required String photoUrl});
   ProduceListing publicListing(ProduceListing listing);
   Future<List<MarketplaceNotification>> loadNotifications();
+  Future<void> markNotificationsRead();
+  Stream<MarketplaceNotification> watchVendorNotifications();
   Future<Set<String>> loadFavorites();
   Future<void> setFavorite({required String listingId, required bool saved});
   Future<VendorTrustSummary> loadVendorTrust(String vendorId);
@@ -224,6 +226,7 @@ abstract interface class MarketplaceRepository implements ReverseGeocoder {
     String? orderDocumentId,
   });
   Future<List<MarketplaceConversation>> loadConversations();
+  Stream<List<MarketplaceConversation>> watchConversations();
   Stream<List<MarketplaceMessage>> watchMessages(String conversationId);
   Future<void> sendMessage({
     required String conversationId,
@@ -551,7 +554,11 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
     final updatedAccount = account.copyWith(profilePhotoBytes: imageBytes);
     _accounts[account.email.toLowerCase()] = updatedAccount;
     _currentAccount = updatedAccount;
-    _service.updateProfilePhotoForUser(account.id, imageBytes);
+    _service.updateProfilePhotoForUser(
+      account.id,
+      photoUrl: null,
+      photoBytes: imageBytes,
+    );
     return updatedAccount;
   }
 
@@ -584,6 +591,11 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
     );
     _accounts[account.email.toLowerCase()] = updatedAccount;
     _currentAccount = updatedAccount;
+    _service.updateProfilePhotoForUser(
+      account.id,
+      photoUrl: updatedAccount.profilePhotoUrl,
+      photoBytes: null,
+    );
     return updatedAccount;
   }
 
@@ -592,8 +604,25 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
       _service.publicListing(listing);
 
   @override
-  Future<List<MarketplaceNotification>> loadNotifications() =>
-      _service.loadNotifications();
+  Future<List<MarketplaceNotification>> loadNotifications() async {
+    final account = _requireAccount();
+    return _service.notificationsFor(userId: account.id, role: account.role);
+  }
+
+  @override
+  Future<void> markNotificationsRead() async {
+    _service.markNotificationsRead(_requireAccount().id);
+  }
+
+  @override
+  Stream<MarketplaceNotification> watchVendorNotifications() {
+    final account = _requireVendor();
+    return _service.notificationUpdates.where(
+      (notification) =>
+          notification.targetRole == 'Vendor' &&
+          notification.recipientUid == account.id,
+    );
+  }
 
   @override
   Future<Set<String>> loadFavorites() async =>
@@ -931,6 +960,10 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
   @override
   Future<List<MarketplaceConversation>> loadConversations() async =>
       _service.conversationsFor(_requireAccount().id);
+
+  @override
+  Stream<List<MarketplaceConversation>> watchConversations() =>
+      _service.watchConversations(_requireAccount().id);
 
   @override
   Stream<List<MarketplaceMessage>> watchMessages(String conversationId) =>
