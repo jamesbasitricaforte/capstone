@@ -682,6 +682,224 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /marketplace_conversations/{conversationId} {
+      function isParticipant(data) {
+        return data.buyer_uid == request.auth.uid
+          || data.vendor_uid == request.auth.uid;
+      }
+
+      function validConversation(data) {
+        let listingPath = /databases/$(database)/documents/listings/$(data.listing_id);
+        let buyerPath = /databases/$(database)/documents/users/$(data.buyer_uid);
+        let vendorPath = /databases/$(database)/documents/users/$(data.vendor_uid);
+        let orderPath = /databases/$(database)/documents/marketplace_transactions/$(data.order_document_id);
+        return data.keys().hasAll([
+            'listing_id',
+            'listing_name',
+            'buyer_uid',
+            'vendor_uid',
+            'buyer_label',
+            'vendor_label',
+            'buyer_photo_url',
+            'vendor_photo_url',
+            'buyer_photo_bytes',
+            'vendor_photo_bytes',
+            'last_message',
+            'updated_at'
+          ])
+          && data.keys().hasOnly([
+            'listing_id',
+            'listing_name',
+            'buyer_uid',
+            'vendor_uid',
+            'buyer_label',
+            'vendor_label',
+            'buyer_photo_url',
+            'vendor_photo_url',
+            'buyer_photo_bytes',
+            'vendor_photo_bytes',
+            'last_message',
+            'updated_at',
+            'order_document_id'
+          ])
+          && data.listing_id is string
+          && data.listing_name is string
+          && data.listing_name.size() > 0
+          && data.buyer_uid is string
+          && data.vendor_uid is string
+          && data.buyer_uid != data.vendor_uid
+          && data.buyer_label is string
+          && data.vendor_label is string
+          && (
+            data.buyer_photo_url == null
+            || validHttpsUrl(data.buyer_photo_url)
+          )
+          && (
+            data.vendor_photo_url == null
+            || validHttpsUrl(data.vendor_photo_url)
+          )
+          && (
+            data.buyer_photo_bytes == null
+            || (
+              data.buyer_photo_bytes is bytes
+              && data.buyer_photo_bytes.size() <= 716800
+            )
+          )
+          && (
+            data.vendor_photo_bytes == null
+            || (
+              data.vendor_photo_bytes is bytes
+              && data.vendor_photo_bytes.size() <= 716800
+            )
+          )
+          && data.last_message is string
+          && data.last_message.size() <= 2000
+          && data.updated_at == request.time
+          && exists(buyerPath)
+          && get(buyerPath).data.role == 'Buyer'
+          && exists(vendorPath)
+          && get(vendorPath).data.role == 'Vendor'
+          && (
+            (
+              exists(listingPath)
+              && get(listingPath).data.owner_uid == data.vendor_uid
+            )
+            || (
+              data.order_document_id is string
+              && data.order_document_id.size() > 0
+              && exists(orderPath)
+              && get(orderPath).data.kind == 'order'
+              && get(orderPath).data.buyer_uid == data.buyer_uid
+              && get(orderPath).data.vendor_uid == data.vendor_uid
+              && get(orderPath).data.listing_id == data.listing_id
+            )
+          )
+          && (
+            !data.keys().hasAny(['order_document_id'])
+            || data.order_document_id == null
+            || data.order_document_id is string
+          );
+      }
+
+      allow get: if signedIn()
+        && (
+          !exists(
+            /databases/$(database)/documents/marketplace_conversations/$(conversationId)
+          )
+          || isParticipant(resource.data)
+        );
+      allow list: if signedIn() && isParticipant(resource.data);
+      allow create: if signedIn()
+        && isParticipant(request.resource.data)
+        && conversationId
+          == request.resource.data.listing_id
+            + ':'
+            + request.resource.data.buyer_uid
+            + ':'
+            + request.resource.data.vendor_uid
+        && validConversation(request.resource.data);
+      allow update: if signedIn()
+        && isParticipant(resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'last_message',
+          'updated_at'
+        ])
+        && request.resource.data.last_message is string
+        && request.resource.data.last_message.size() <= 2000
+        && request.resource.data.updated_at == request.time;
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        function canAccessConversation() {
+          let conversation = get(
+            /databases/$(database)/documents/marketplace_conversations/$(conversationId)
+          ).data;
+          return signedIn()
+            && (
+              conversation.buyer_uid == request.auth.uid
+              || conversation.vendor_uid == request.auth.uid
+            );
+        }
+
+        allow read: if canAccessConversation();
+        allow create: if canAccessConversation()
+          && request.resource.data.keys().hasAll([
+            'sender_uid',
+            'text',
+            'created_at',
+            'image_chunk_count',
+            'image_size_bytes',
+            'hidden_by'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'sender_uid',
+            'text',
+            'created_at',
+            'image_chunk_count',
+            'image_size_bytes',
+            'hidden_by'
+          ])
+          && request.resource.data.sender_uid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 2000
+          && request.resource.data.created_at == request.time
+          && request.resource.data.image_chunk_count is int
+          && request.resource.data.image_chunk_count >= 0
+          && request.resource.data.image_chunk_count <= 8
+          && request.resource.data.image_size_bytes is int
+          && request.resource.data.image_size_bytes >= 0
+          && request.resource.data.image_size_bytes <= 5000000
+          && (
+            (
+              request.resource.data.image_chunk_count == 0
+              && request.resource.data.image_size_bytes == 0
+            )
+            || (
+              request.resource.data.image_chunk_count > 0
+              && request.resource.data.image_size_bytes
+                > (request.resource.data.image_chunk_count - 1) * 625000
+              && request.resource.data.image_size_bytes
+                <= request.resource.data.image_chunk_count * 625000
+            )
+          )
+          && request.resource.data.hidden_by is list
+          && request.resource.data.hidden_by.size() == 0
+          && (
+            request.resource.data.text.size() > 0
+            || request.resource.data.image_chunk_count > 0
+          );
+        allow update: if canAccessConversation()
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['hidden_by'])
+          && resource.data.hidden_by is list
+          && request.resource.data.hidden_by is list
+          && request.resource.data.hidden_by.size()
+            == resource.data.hidden_by.size() + 1
+          && request.resource.data.hidden_by.hasAll(resource.data.hidden_by)
+          && request.resource.data.hidden_by.hasAny([request.auth.uid]);
+        allow delete: if false;
+
+        match /image_chunks/{chunkId} {
+          function messagePath() {
+            return /databases/$(database)/documents/marketplace_conversations/$(conversationId)/messages/$(messageId);
+          }
+
+          allow read: if canAccessConversation();
+          allow create: if canAccessConversation()
+            && existsAfter(messagePath())
+            && getAfter(messagePath()).data.sender_uid == request.auth.uid
+            && request.resource.data.index
+              < getAfter(messagePath()).data.image_chunk_count
+            && validImageChunkId(chunkId, request.resource.data.index)
+            && request.resource.data.keys().hasAll(['index', 'bytes'])
+            && request.resource.data.keys().hasOnly(['index', 'bytes'])
+            && request.resource.data.bytes is bytes
+            && request.resource.data.bytes.size() <= 625000;
+          allow update, delete: if false;
+        }
+      }
+    }
+
     match /vendor_reviews/{reviewId} {
       allow read: if true;
       allow create: if validVendorReview(reviewId);

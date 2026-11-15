@@ -1477,6 +1477,11 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
                 ),
             listings: listings,
             onViewListing: _showListingDetails,
+            onMessageVendor:
+                _signedInRole == 'Buyer' &&
+                    listing.ownerUid?.trim().isNotEmpty == true
+                ? () => _contactVendor(listing)
+                : null,
           ),
         ),
       );
@@ -1961,6 +1966,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
               isBuyer: _signedInRole == 'Buyer',
               isSignedIn: _signedInRole != null,
               signedInRole: _signedInRole,
+              signedInAccount: _signedInAccount,
               cartItemCount: _cartItems.fold(
                 0,
                 (sum, item) => sum + item.quantity,
@@ -2040,7 +2046,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       return _GuestAccessPage(
         onCreateAccount: () => _showSignIn(createAccount: true),
         onSignIn: () => _showSignIn(),
-        onVendorSignIn: () => _showSignIn(initialAccountType: 'Vendor'),
         onBrowseAsGuest: () => setState(() {
           _isGuestBrowsing = true;
           _section = _Section.explore;
@@ -2605,6 +2610,7 @@ class _MarketplaceHeader extends StatelessWidget {
     required this.isBuyer,
     required this.isSignedIn,
     required this.signedInRole,
+    required this.signedInAccount,
     required this.cartItemCount,
     required this.onOpenCart,
     required this.onNotifications,
@@ -2617,6 +2623,7 @@ class _MarketplaceHeader extends StatelessWidget {
   final bool isBuyer;
   final bool isSignedIn;
   final String? signedInRole;
+  final MarketplaceAccount? signedInAccount;
   final int cartItemCount;
   final VoidCallback onOpenCart;
   final VoidCallback onNotifications;
@@ -2718,29 +2725,19 @@ class _MarketplaceHeader extends StatelessWidget {
                     ),
                   const SizedBox(width: 10),
                 ],
-                if (signedInRole == null)
-                  IconButton(
-                    tooltip: 'Sign in',
-                    onPressed: onSignIn,
-                    icon: const Icon(Icons.person_outline),
-                  )
-                else
+                if (signedInRole != null)
                   Tooltip(
                     message: 'Account: $signedInRole',
                     child: InkWell(
                       onTap: onSignIn,
                       customBorder: const CircleBorder(),
-                      child: CircleAvatar(
+                      child: ProfilePhotoAvatar(
                         radius: 23,
-                        backgroundColor: const Color(0xFFE9EFE5),
-                        child: Text(
-                          signedInRole == 'Vendor' ? 'VE' : 'BY',
-                          style: TextStyle(
-                            color: _forest,
-                            fontSize: compact ? 12 : 13,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+                        photoUrl: signedInAccount?.profilePhotoUrl,
+                        photoBytes: signedInAccount?.profilePhotoBytes,
+                        placeholderText: signedInRole == 'Vendor'
+                            ? 'VE'
+                            : 'BY',
                       ),
                     ),
                   ),
@@ -6149,13 +6146,11 @@ class _GuestAccessPage extends StatelessWidget {
   const _GuestAccessPage({
     required this.onCreateAccount,
     required this.onSignIn,
-    required this.onVendorSignIn,
     required this.onBrowseAsGuest,
   });
 
   final VoidCallback onCreateAccount;
   final VoidCallback onSignIn;
-  final VoidCallback onVendorSignIn;
   final VoidCallback onBrowseAsGuest;
 
   @override
@@ -6326,27 +6321,7 @@ class _GuestAccessPage extends StatelessWidget {
                                               ),
                                             ),
                                             onPressed: onSignIn,
-                                            child: const Text(
-                                              'I already have an account',
-                                            ),
-                                          ),
-                                        ),
-                                        TextButton(
-                                          onPressed: onVendorSignIn,
-                                          child: const Text.rich(
-                                            TextSpan(
-                                              text: 'Are you a vendor? ',
-                                              children: [
-                                                TextSpan(
-                                                  text: 'Sign in',
-                                                  style: TextStyle(
-                                                    color: _forest,
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                                ),
-                                                TextSpan(text: ' to continue'),
-                                              ],
-                                            ),
+                                            child: const Text('Sign in'),
                                           ),
                                         ),
                                       ],
@@ -7026,15 +7001,6 @@ class _ProfilePage extends StatelessWidget {
                       onPressed: onVendorSignIn,
                       child: const Text(
                         'I’m a vendor — sign in to post produce',
-                      ),
-                    ),
-                  ] else ...[
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: onVendorSignIn,
-                        icon: const Icon(Icons.storefront_outlined),
-                        label: const Text('Switch to vendor account'),
                       ),
                     ),
                   ],

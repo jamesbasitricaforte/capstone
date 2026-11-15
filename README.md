@@ -19,13 +19,14 @@ existing Firebase project. Deploy the Firestore security rules with:
 firebase deploy --project new-project-c0fa2 --only firestore:rules
 ```
 
-Firebase Auth registrations send an email verification link. Users must verify
-their email before using protected buyer or vendor features; the app refreshes
-the Auth status when resumed and does not store a client-editable verification
-flag in Firestore. Configure the Firebase Authentication email template and
-deploy the updated rules before release. Phone OTP, trusted administrator
-claims, vendor verification review, reports, and account blocking are not part
-of this phase.
+Firebase Auth registrations send an email verification link for protected
+buyer/vendor workflows, but marketplace messaging is available to signed-in
+buyer and vendor participants once their profile exists. The app refreshes the
+Auth status when resumed and does not store a client-editable verification flag
+in Firestore. Configure the Firebase Authentication email template and deploy
+the updated rules before release. Phone OTP, trusted administrator claims,
+vendor verification review, reports, and account blocking are not part of this
+phase.
 Firebase Auth applies its own anti-abuse limits to verification-email requests;
 the app has no resend cooldown, and those service limits cannot be disabled by
 changing the email address or editing this Flutter client.

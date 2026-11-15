@@ -12,6 +12,7 @@ import 'package:project_rescue/models/produce_listing.dart';
 import 'package:project_rescue/models/marketplace_purchase.dart';
 import 'package:project_rescue/models/marketplace_trust.dart';
 import 'package:project_rescue/models/vendor_store_profile.dart';
+import 'package:project_rescue/widgets/profile_photo_avatar.dart';
 import 'package:project_rescue/widgets/vendor_locations_page.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -121,6 +122,9 @@ class _VendorStoreBrowsingRepository extends InMemoryMarketplaceRepository {
   Future<List<ProduceListing>> loadPublicListings() async => [
     publicListing(_listing),
   ];
+
+  @override
+  Future<List<ProduceListing>> loadListings() async => loadPublicListings();
 
   @override
   Future<VendorStoreProfile?> loadVendorStoreProfile(String vendorId) async {
@@ -474,6 +478,8 @@ void main() {
 
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
+    expect(find.byTooltip('Sign in'), findsNothing);
+    expect(find.text('Sign in'), findsOneWidget);
     expect(
       tester.getCenter(find.byIcon(Icons.eco_outlined).first).dx,
       lessThan(60),
@@ -489,7 +495,7 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('I already have an account'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
     expect(find.text('Sign in to Local Produce'), findsOneWidget);
     expect(find.byType(Image), findsNWidgets(2));
@@ -513,7 +519,7 @@ void main() {
 
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('I already have an account'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Forgot password?'));
@@ -540,14 +546,15 @@ void main() {
 
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('I already have an account'));
-    await tester.tap(find.text('I already have an account'));
+    await tester.ensureVisible(find.text('Sign in'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
 
     expect(find.text('OR TRY A ROLE DEMO'), findsNothing);
     expect(find.text('Buyer demo'), findsNothing);
     expect(find.text('Vendor demo'), findsNothing);
     expect(find.text('Sign in to Local Produce'), findsOneWidget);
+    expect(find.textContaining('Are you a vendor?'), findsNothing);
   });
 
   testWidgets('vendor navigation follows the authenticated API role', (
@@ -560,8 +567,8 @@ void main() {
 
     await tester.pumpWidget(MyApp(repository: _VendorRoleRepository()));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('I already have an account'));
-    await tester.tap(find.text('I already have an account'));
+    await tester.ensureVisible(find.text('Sign in'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
     await tester.tap(find.byType(DropdownButtonFormField<String>));
     await tester.pumpAndSettle();
@@ -612,7 +619,7 @@ void main() {
 
     await tester.pumpWidget(MyApp(repository: repository));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('I already have an account'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byType(TextFormField).at(0),
@@ -947,6 +954,30 @@ void main() {
     expect(find.text('Fresh Tomatoes'), findsWidgets);
   });
 
+  testWidgets('buyers can message a vendor from the vendor store page', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 2200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final repository = _VendorStoreBrowsingRepository(Uint8List(0));
+    addTearDown(repository.dispose);
+    await tester.pumpWidget(MyApp(repository: repository));
+    await tester.pumpAndSettle();
+    await registerBuyer(tester);
+
+    await tester.tap(find.text('Guest Store').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Message vendor'), findsOneWidget);
+
+    await tester.tap(find.text('Message vendor'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start the conversation with a message.'), findsOneWidget);
+  });
+
   testWidgets('guests can open a vendor store from public listings', (
     tester,
   ) async {
@@ -977,6 +1008,7 @@ void main() {
     expect(find.text('Guest Vendor'), findsOneWidget);
     expect(find.text('Products from this store'), findsOneWidget);
     expect(find.text('Guest Store Tomatoes'), findsOneWidget);
+    expect(find.text('Message vendor'), findsNothing);
     expect(find.text('Posted 2026-11-14 14:05:09'), findsWidgets);
     expect(
       find.byWidgetPredicate(
@@ -1158,6 +1190,44 @@ void main() {
     expect(find.text('My orders (1)'), findsOneWidget);
   });
 
+  testWidgets('header shows the buyer profile photo in the account avatar', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(700, 932);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final photoBytes = Uint8List.fromList(
+      img.encodePng(img.Image(width: 2, height: 2)),
+    );
+    final repository = InMemoryMarketplaceRepository()
+      ..setAuthenticatedAccount(
+        MarketplaceAccount(
+          id: 'buyer-with-photo',
+          role: 'Buyer',
+          email: 'buyer@example.com',
+          profilePhotoBytes: photoBytes,
+        ),
+      );
+    addTearDown(repository.dispose);
+
+    await tester.pumpWidget(MyApp(repository: repository));
+    await tester.pumpAndSettle();
+
+    final avatar = find.descendant(
+      of: find.byTooltip('Account: Buyer'),
+      matching: find.byType(ProfilePhotoAvatar),
+    );
+    expect(avatar, findsOneWidget);
+    expect(tester.widget<ProfilePhotoAvatar>(avatar).photoBytes, photoBytes);
+    expect(
+      find.descendant(of: avatar, matching: find.byType(Image)),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('profile provides a back-to-market action', (tester) async {
     tester.view.physicalSize = const Size(1280, 2200);
     tester.view.devicePixelRatio = 1;
@@ -1200,7 +1270,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byTooltip('Account: Buyer'), findsNothing);
-    expect(find.byTooltip('Sign in'), findsOneWidget);
+    expect(find.byTooltip('Sign in'), findsNothing);
+    expect(find.text('Sign in'), findsOneWidget);
     expect(find.text('Browse as guest'), findsOneWidget);
   });
 
@@ -1215,7 +1286,7 @@ void main() {
       final repository = _NonOwnerVendorRepository();
       await tester.pumpWidget(MyApp(repository: repository));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Sign in'));
+      await tester.tap(find.text('Sign in'));
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byType(TextFormField).at(0),
@@ -1370,7 +1441,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Post produce'), findsNothing);
-    await tester.tap(find.byTooltip('Sign in'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
 
     await tester.enterText(
@@ -1385,7 +1456,10 @@ void main() {
     expect(find.text('Post produce'), findsNothing);
     await tester.tap(find.byTooltip('Account: Buyer'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Switch to vendor account'));
+    expect(find.text('Switch to vendor account'), findsNothing);
+    await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
 
     await tester.enterText(
@@ -1421,7 +1495,7 @@ void main() {
 
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Sign in'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
 
     Future<void> submitAccount({required bool create}) async {
@@ -1452,7 +1526,7 @@ void main() {
       MyApp(key: UniqueKey(), repository: InMemoryMarketplaceRepository()),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Sign in'));
+    await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
     await submitAccount(create: true);
   });

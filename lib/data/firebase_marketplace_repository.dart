@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../models/marketplace_messaging.dart';
 import '../models/marketplace_purchase.dart';
 import '../models/marketplace_trust.dart';
 import '../models/produce_listing.dart';
@@ -1126,6 +1127,243 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
       _listingService.deleteListing(listingId);
 
   @override
+  Future<MarketplaceConversation> openConversation({
+    required String listingId,
+    required String listingName,
+    required String otherUserId,
+    required String otherName,
+    String? orderDocumentId,
+  }) async {
+    try {
+      final account = await _requireMessagingAccount();
+      if (otherUserId.isEmpty || otherUserId == account.id) {
+        throw const MarketplaceApiException(
+          'Choose a different buyer or vendor to message.',
+        );
+      }
+
+      final isBuyer = account.role == 'Buyer';
+      final buyerUid = isBuyer ? account.id : otherUserId;
+      final vendorUid = isBuyer ? otherUserId : account.id;
+      final reference = _conversationCollection.doc(
+        '$listingId:$buyerUid:$vendorUid',
+      );
+      final existing = await reference.get();
+      if (existing.exists) return _conversationFromDocument(existing);
+
+      final buyerLabel = isBuyer
+          ? _buyerMessageLabel(account)
+          : otherName.trim();
+      final vendorLabel = isBuyer
+          ? otherName.trim()
+          : _vendorMessageLabel(account);
+      final buyerPhotoUrl = isBuyer ? account.profilePhotoUrl : null;
+      final vendorPhotoUrl = isBuyer ? null : account.profilePhotoUrl;
+      final buyerPhotoBytes = isBuyer ? account.profilePhotoBytes : null;
+      final vendorPhotoBytes = isBuyer ? null : account.profilePhotoBytes;
+      final now = DateTime.now();
+      final data = <String, Object?>{
+        'listing_id': listingId,
+        'listing_name': listingName,
+        'buyer_uid': buyerUid,
+        'vendor_uid': vendorUid,
+        'buyer_label': buyerLabel,
+        'vendor_label': vendorLabel,
+        'buyer_photo_url': buyerPhotoUrl,
+        'vendor_photo_url': vendorPhotoUrl,
+        'buyer_photo_bytes': buyerPhotoBytes == null
+            ? null
+            : Blob(buyerPhotoBytes),
+        'vendor_photo_bytes': vendorPhotoBytes == null
+            ? null
+            : Blob(vendorPhotoBytes),
+        'last_message': '',
+        'updated_at': FieldValue.serverTimestamp(),
+        'order_document_id': orderDocumentId,
+      };
+      await reference.set(data);
+      return MarketplaceConversation(
+        id: reference.id,
+        listingId: listingId,
+        listingName: listingName,
+        buyerUid: buyerUid,
+        vendorUid: vendorUid,
+        buyerLabel: buyerLabel,
+        vendorLabel: vendorLabel,
+        updatedAt: now,
+        buyerPhotoUrl: buyerPhotoUrl,
+        vendorPhotoUrl: vendorPhotoUrl,
+        buyerPhotoBytes: buyerPhotoBytes,
+        vendorPhotoBytes: vendorPhotoBytes,
+      );
+    } on FirebaseException catch (error) {
+      if (_isPermissionDenied(error)) {
+        return super.openConversation(
+          listingId: listingId,
+          listingName: listingName,
+          otherUserId: otherUserId,
+          otherName: otherName,
+          orderDocumentId: orderDocumentId,
+        );
+      }
+      rethrow;
+    }
+  }
+
+  @override
+  Future<List<MarketplaceConversation>> loadConversations() async {
+    try {
+      final account = await _requireMessagingAccount();
+      final snapshots = await Future.wait([
+        _conversationCollection.where('buyer_uid', isEqualTo: account.id).get(),
+        _conversationCollection
+            .where('vendor_uid', isEqualTo: account.id)
+            .get(),
+      ]);
+      final documents = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
+      for (final snapshot in snapshots) {
+        for (final document in snapshot.docs) {
+          documents[document.id] = document;
+        }
+      }
+      final conversations =
+          documents.values.map(_conversationFromDocument).toList()..sort(
+            (first, second) => second.updatedAt.compareTo(first.updatedAt),
+          );
+      return List.unmodifiable(conversations);
+    } on FirebaseException catch (error) {
+      if (_isPermissionDenied(error)) {
+        return super.loadConversations();
+      }
+      rethrow;
+    }
+  }
+
+  @override
+  Stream<List<MarketplaceMessage>> watchMessages(String conversationId) {
+    final userId = _auth.currentUser?.uid;
+    if (userId == null) {
+      return Stream.error(
+        const MarketplaceApiException('Please sign in to view messages.'),
+      );
+    }
+    return _messageCollection(conversationId)
+        .orderBy('created_at')
+        .snapshots()
+        .asyncMap((snapshot) async {
+          final messages = <MarketplaceMessage>[];
+          for (final document in snapshot.docs) {
+            final data = document.data();
+            final hiddenBy = data['hidden_by'];
+            if (hiddenBy is List && hiddenBy.contains(userId)) continue;
+            messages.add(await _messageFromDocument(document));
+          }
+          return List.unmodifiable(messages);
+        });
+  }
+
+  @override
+  Future<void> sendMessage({
+    required String conversationId,
+    required String text,
+    Uint8List? imageBytes,
+    String? imageName,
+  }) async {
+    try {
+      final account = await _requireMessagingAccount();
+      final messageText = text.trim();
+      if (messageText.isEmpty && (imageBytes == null || imageBytes.isEmpty)) {
+        throw const MarketplaceApiException(
+          'Enter a message or attach an image.',
+        );
+      }
+      if (messageText.length > 2000) {
+        throw const MarketplaceApiException(
+          'Messages can contain up to 2,000 characters.',
+        );
+      }
+      final imageChunks = imageBytes == null
+          ? const <Uint8List>[]
+          : splitFirestoreImageBytes(imageBytes);
+      final conversationReference = _conversationCollection.doc(conversationId);
+      final conversation = await conversationReference.get();
+      if (!conversation.exists ||
+          !_isConversationParticipant(conversation.data(), account.id)) {
+        throw const MarketplaceApiException('Conversation not found.');
+      }
+
+      final messageReference = conversationReference
+          .collection('messages')
+          .doc();
+      final batch = _firestore.batch()
+        ..set(messageReference, {
+          'sender_uid': account.id,
+          'text': messageText,
+          'created_at': FieldValue.serverTimestamp(),
+          'image_chunk_count': imageChunks.length,
+          'image_size_bytes': imageBytes?.length ?? 0,
+          'hidden_by': <String>[],
+        })
+        ..update(conversationReference, {
+          'last_message': messageText.isEmpty ? 'Photo' : messageText,
+          'updated_at': FieldValue.serverTimestamp(),
+        });
+      for (var index = 0; index < imageChunks.length; index++) {
+        batch.set(messageReference.collection('image_chunks').doc('$index'), {
+          'index': index,
+          'bytes': Blob(imageChunks[index]),
+        });
+      }
+      await batch.commit();
+    } on FirebaseException catch (error) {
+      if (_isPermissionDenied(error)) {
+        await super.sendMessage(
+          conversationId: conversationId,
+          text: text,
+          imageBytes: imageBytes,
+          imageName: imageName,
+        );
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> deleteMessageForMe({
+    required String conversationId,
+    required String messageId,
+  }) async {
+    try {
+      final account = await _requireMessagingAccount();
+      final conversationReference = _conversationCollection.doc(conversationId);
+      final conversation = await conversationReference.get();
+      if (!conversation.exists ||
+          !_isConversationParticipant(conversation.data(), account.id)) {
+        throw const MarketplaceApiException('Conversation not found.');
+      }
+      final messageReference = _messageCollection(conversationId)
+          .doc(messageId);
+      final message = await messageReference.get();
+      if (!message.exists) {
+        throw const MarketplaceApiException('Message is no longer available.');
+      }
+      await messageReference.update({
+        'hidden_by': FieldValue.arrayUnion([account.id]),
+      });
+    } on FirebaseException catch (error) {
+      if (_isPermissionDenied(error)) {
+        await super.deleteMessageForMe(
+          conversationId: conversationId,
+          messageId: messageId,
+        );
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  @override
   void dispose() {
     unawaited(_listingSubscription.cancel());
     unawaited(_listingUpdates.close());
@@ -1139,8 +1377,158 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
   CollectionReference<Map<String, dynamic>> get _vendorReviews =>
       _firestore.collection('vendor_reviews');
 
+  CollectionReference<Map<String, dynamic>> get _conversationCollection =>
+      _firestore.collection('marketplace_conversations');
+
+  CollectionReference<Map<String, dynamic>> _messageCollection(
+    String conversationId,
+  ) => _conversationCollection.doc(conversationId).collection('messages');
+
   CollectionReference<Map<String, dynamic>> _cartCollection(String userId) =>
       _firestore.collection('users').doc(userId).collection('cart');
+
+  Future<MarketplaceAccount> _requireMessagingAccount() async {
+    var user = _auth.currentUser;
+    if (user == null) {
+      throw const MarketplaceApiException('Please sign in to continue.');
+    }
+    await user.reload();
+    user = _auth.currentUser;
+    if (user == null) {
+      throw const MarketplaceApiException('Please sign in to continue.');
+    }
+    await user.getIdToken(true);
+    final profile = await _userDocument(user).get();
+    if (!profile.exists) {
+      throw const MarketplaceApiException(
+        'Your account profile could not be found. Please sign in again.',
+      );
+    }
+    final account = _accountFromData(user, profile.data()!);
+    if (account.role != 'Buyer' && account.role != 'Vendor') {
+      throw const MarketplaceApiException(
+        'Only buyer and vendor accounts can use messages.',
+        statusCode: 403,
+      );
+    }
+    return account;
+  }
+
+  MarketplaceConversation _conversationFromDocument(
+    DocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final data = document.data();
+    if (data == null) {
+      throw const FormatException('The conversation data is missing.');
+    }
+    final updatedAt = data['updated_at'];
+    if (updatedAt is! Timestamp) {
+      throw const FormatException('The conversation date is invalid.');
+    }
+    return MarketplaceConversation(
+      id: document.id,
+      listingId: _requiredString(data, 'listing_id'),
+      listingName: _requiredString(data, 'listing_name'),
+      buyerUid: _requiredString(data, 'buyer_uid'),
+      vendorUid: _requiredString(data, 'vendor_uid'),
+      buyerLabel: _requiredString(data, 'buyer_label'),
+      vendorLabel: _requiredString(data, 'vendor_label'),
+      updatedAt: updatedAt.toDate(),
+      lastMessage: _requiredString(data, 'last_message'),
+      buyerPhotoUrl: data['buyer_photo_url'] as String?,
+      vendorPhotoUrl: data['vendor_photo_url'] as String?,
+      buyerPhotoBytes: _profilePhotoBytesFromValue(data['buyer_photo_bytes']),
+      vendorPhotoBytes: _profilePhotoBytesFromValue(data['vendor_photo_bytes']),
+    );
+  }
+
+  Future<MarketplaceMessage> _messageFromDocument(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) async {
+    final data = document.data();
+    final createdAt = data['created_at'];
+    if (createdAt is! Timestamp) {
+      throw const FormatException('The message date is invalid.');
+    }
+    final chunkCount = data['image_chunk_count'];
+    if (chunkCount is! int || chunkCount < 0 || chunkCount > 8) {
+      throw const FormatException('The message image data is invalid.');
+    }
+    final imageSize = data['image_size_bytes'];
+    if (imageSize is! int ||
+        imageSize < 0 ||
+        imageSize > maxFirestoreImageBytes ||
+        (chunkCount == 0 && imageSize != 0) ||
+        (chunkCount > 0 &&
+            (imageSize <= (chunkCount - 1) * maxFirestoreImageChunkBytes ||
+                imageSize > chunkCount * maxFirestoreImageChunkBytes))) {
+      throw const FormatException('The message image data is invalid.');
+    }
+    Uint8List? imageBytes;
+    if (chunkCount > 0) {
+      final chunks = await document.reference
+          .collection('image_chunks')
+          .orderBy('index')
+          .get();
+      if (chunks.docs.length != chunkCount) {
+        throw const FormatException('The message image is incomplete.');
+      }
+      final bytes = <int>[];
+      for (final chunk in chunks.docs) {
+        final value = chunk.data()['bytes'];
+        if (value is Blob) {
+          bytes.addAll(value.bytes);
+        } else if (value is Uint8List) {
+          bytes.addAll(value);
+        } else {
+          throw const FormatException('The message image data is invalid.');
+        }
+      }
+      if (bytes.length != imageSize) {
+        throw const FormatException('The message image is incomplete.');
+      }
+      imageBytes = Uint8List.fromList(bytes);
+    }
+    final imageUrl = data['image_url'];
+    return MarketplaceMessage(
+      id: document.id,
+      senderUid: _requiredString(data, 'sender_uid'),
+      text: _requiredString(data, 'text'),
+      createdAt: createdAt.toDate(),
+      imageUrl: imageUrl as String?,
+      imageBytes: imageBytes,
+    );
+  }
+
+  String _requiredString(Map<String, dynamic> data, String key) {
+    final value = data[key];
+    if (value is! String) {
+      throw FormatException('The "$key" field is invalid.');
+    }
+    return value;
+  }
+
+  bool _isConversationParticipant(Map<String, dynamic>? data, String userId) =>
+      data != null &&
+      (data['buyer_uid'] == userId || data['vendor_uid'] == userId);
+
+  bool _isPermissionDenied(Object error) =>
+      error is FirebaseException &&
+      (error.code == 'permission-denied' ||
+          error.code == 'PERMISSION_DENIED' ||
+          error.message?.toLowerCase().contains('permission') == true);
+
+  String _buyerMessageLabel(MarketplaceAccount account) {
+    final label = account.fullName?.trim();
+    return label == null || label.isEmpty ? account.email : label;
+  }
+
+  String _vendorMessageLabel(MarketplaceAccount account) {
+    final label = account.companyName?.trim().isNotEmpty == true
+        ? account.companyName!.trim()
+        : account.fullName?.trim();
+    return label == null || label.isEmpty ? account.email : label;
+  }
 
   Future<MarketplaceAccount> _requireCommerceAccount(String role) async {
     final user = _auth.currentUser;
@@ -1587,6 +1975,4 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
     'too-many-requests' => 'Too many attempts. Please try again later.',
     _ => error.message ?? 'Firebase Authentication failed (${error.code}).',
   };
-
-
 }

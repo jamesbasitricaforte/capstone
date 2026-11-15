@@ -112,8 +112,8 @@ void main() {
       expect(find.byKey(const ValueKey('phone-camera-island')), findsOneWidget);
       expect(tester.takeException(), isNull);
 
-      await tester.ensureVisible(find.text('I already have an account'));
-      await tester.tap(find.text('I already have an account'));
+      await tester.ensureVisible(find.text('Sign in'));
+      await tester.tap(find.text('Sign in'));
       await tester.pumpAndSettle();
       expect(find.text('Sign in to Local Produce'), findsOneWidget);
       expect(tester.takeException(), isNull);

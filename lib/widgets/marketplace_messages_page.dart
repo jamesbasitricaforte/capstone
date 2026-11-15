@@ -55,10 +55,15 @@ class MarketplaceMessagesPage extends StatelessWidget {
             if (isLoading) const LinearProgressIndicator(),
             if (error != null) ...[
               const SizedBox(height: 12),
-              Text(
-                'Could not load messages: $error',
-                style: const TextStyle(color: Color(0xFF9D4038)),
-              ),
+              Text(() {
+                final errorText = error.toString().toLowerCase();
+                if (errorText.contains('permission-denied') ||
+                    errorText.contains('missing or insufficient permissions') ||
+                    errorText.contains('permission')) {
+                  return 'Messages are unavailable until the Firestore rules allow chat access.';
+                }
+                return 'Could not load messages.';
+              }(), style: const TextStyle(color: Color(0xFF9D4038))),
               TextButton(onPressed: onRefresh, child: const Text('Try again')),
             ] else if (!isLoading && conversations.isEmpty)
               const Padding(
@@ -268,9 +273,16 @@ class _MarketplaceConversationDialogState
                 stream: widget.repository.watchMessages(widget.conversation.id),
                 builder: (context, snapshot) {
                   if (snapshot.hasError) {
-                    return Center(
-                      child: Text('Could not load messages: ${snapshot.error}'),
-                    );
+                    final errorText = snapshot.error.toString().toLowerCase();
+                    final message =
+                        errorText.contains('permission-denied') ||
+                            errorText.contains(
+                              'missing or insufficient permissions',
+                            ) ||
+                            errorText.contains('permission')
+                        ? 'Messages are unavailable until the Firestore rules allow chat access.'
+                        : 'Could not load messages.';
+                    return Center(child: Text(message));
                   }
                   final messages = snapshot.data ?? const [];
                   if (messages.isEmpty) {

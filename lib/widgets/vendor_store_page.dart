@@ -13,11 +13,13 @@ class VendorStorePage extends StatefulWidget {
     required this.profile,
     required this.listings,
     required this.onViewListing,
+    this.onMessageVendor,
   });
 
   final VendorStoreProfile profile;
   final List<ProduceListing> listings;
   final ValueChanged<ProduceListing> onViewListing;
+  final VoidCallback? onMessageVendor;
 
   @override
   State<VendorStorePage> createState() => _VendorStorePageState();
@@ -93,6 +95,17 @@ class _VendorStorePageState extends State<VendorStorePage> {
                       ),
                     ],
                   ),
+                  if (widget.onMessageVendor != null) ...[
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: widget.onMessageVendor,
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: const Text('Message vendor'),
+                      ),
+                    ),
+                  ],
                   if (_hasText(profile.description)) ...[
                     const SizedBox(height: 18),
                     Text(
