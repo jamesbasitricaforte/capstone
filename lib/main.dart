@@ -140,7 +140,16 @@ class MyApp extends StatelessWidget {
   }
 }
 
-enum _Section { explore, nearby, cart, messages, Notification, profile }
+enum _Section {
+  explore,
+  nearby,
+  cart,
+  messages,
+  Notification,
+  transactions,
+  market,
+  profile,
+}
 
 class MarketplaceScreen extends StatefulWidget {
   const MarketplaceScreen({
@@ -650,11 +659,13 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   Future<void> _setSection(_Section section) async {
     if (_signedInRole == null &&
         section != _Section.explore &&
+        section != _Section.market &&
         section != _Section.nearby) {
       final action = switch (section) {
         _Section.cart => 'open your cart',
         _Section.messages => 'view your messages',
         _Section.Notification => 'view your Notification',
+        _Section.transactions => 'view your transactions',
         _Section.profile => 'open your account',
         _ => 'continue',
       };
@@ -706,7 +717,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         }
       }
     });
-    if (section == _Section.profile && _signedInRole == 'Vendor') {
+    if (section == _Section.transactions && _signedInRole == 'Vendor') {
       await _loadVendorOrders();
     }
   }
@@ -1304,7 +1315,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       final signedIn = await _showSignIn(initialAccountType: 'Vendor');
       if (!signedIn || !mounted || _signedInRole != 'Vendor') return;
     }
-    final listing = await showDialog<ProduceListing>(
+    final listings = await showDialog<List<ProduceListing>>(
       context: context,
       builder: (context) => _NewListingDialog(
         vendorEmail: _signedInEmail!,
@@ -1314,9 +1325,11 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         vendorLongitude: _signedInVendorAccount?.longitude,
       ),
     );
-    if (listing == null || !mounted) return;
+    if (listings == null || listings.isEmpty || !mounted) return;
     final messenger = ScaffoldMessenger.of(context);
-    final hasPhotos = listing.pendingMedia.any((media) => !media.isVideo);
+    final hasPhotos = listings.any(
+      (listing) => listing.pendingMedia.any((media) => !media.isVideo),
+    );
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -1330,23 +1343,29 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
               const SizedBox(width: 12),
-              Text(
-                hasPhotos
-                    ? 'Uploading photos and saving listing...'
-                    : 'Saving listing...',
+              Expanded(
+                child: Text(
+                  hasPhotos
+                      ? 'Uploading photos and posting listings...'
+                      : 'Posting listings...',
+                ),
               ),
             ],
           ),
         ),
       );
+    var savedCount = 0;
     try {
-      await _service.addListing(listing);
+      for (final listing in listings) {
+        await _service.addListing(listing);
+        savedCount++;
+      }
       if (!mounted) return;
       messenger.hideCurrentSnackBar();
       await _loadListings();
       if (!mounted) return;
       setState(() {
-        _section = _Section.explore;
+        _section = _Section.market;
         _category = 'All produce';
         _under50 = false;
         _maximumPrice = null;
@@ -1357,14 +1376,31 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         _searchController.clear();
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Listing saved to Firebase.')),
+        SnackBar(
+          content: Text(
+            listings.length == 1
+                ? 'Listing saved to Firebase.'
+                : '${listings.length} listings saved to Firebase.',
+          ),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
+      if (savedCount > 0) {
+        await _loadListings();
+        if (!mounted) return;
+      }
       messenger
         ..hideCurrentSnackBar()
         ..showSnackBar(
-          SnackBar(content: Text('Could not save listing: $error')),
+          SnackBar(
+            content: Text(
+              savedCount == 0
+                  ? 'Could not save listings: $error'
+                  : 'Saved $savedCount of ${listings.length} listings. '
+                        'Could not save the rest: $error',
+            ),
+          ),
         );
     }
   }
@@ -2164,20 +2200,14 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   @override
   Widget build(BuildContext context) {
     final isMobile = MediaQuery.sizeOf(context).width < 760;
-    final navigationSections = _signedInRole == 'Buyer'
-        ? const [
-            _Section.explore,
-            _Section.nearby,
-            _Section.messages,
-            _Section.Notification,
-            _Section.profile,
-          ]
+    final navigationSections = _signedInRole == null
+        ? const [_Section.explore, _Section.nearby, _Section.market]
         : const [
             _Section.explore,
             _Section.nearby,
             _Section.messages,
-            _Section.Notification,
-            _Section.profile,
+            _Section.transactions,
+            _Section.market,
           ];
     return Scaffold(
       body: SafeArea(
@@ -2188,13 +2218,17 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
               isVendor: _signedInRole == 'Vendor',
               isBuyer: _signedInRole == 'Buyer',
               isSignedIn: _signedInRole != null,
+              canBrowseMarket: _signedInRole != null || _isGuestBrowsing,
               signedInRole: _signedInRole,
               signedInAccount: _signedInAccount,
+              unreadNotificationCount: _unreadNotificationCount,
               cartItemCount: _cartItems.fold(
                 0,
                 (sum, item) => sum + item.quantity,
               ),
               onOpenCart: () => _setSection(_Section.cart),
+              onOpenNotification: () => _setSection(_Section.Notification),
+              onOpenMarket: () => _setSection(_Section.market),
               onPostProduce: _showNewListingForm,
               onSignIn: _signedInRole == null
                   ? () => _showSignIn()
@@ -2213,7 +2247,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
           ],
         ),
       ),
-      bottomNavigationBar: isMobile && _signedInRole != null
+      bottomNavigationBar:
+          isMobile && (_signedInRole != null || _isGuestBrowsing)
           ? NavigationBar(
               selectedIndex: navigationSections
                   .indexOf(_section)
@@ -2253,6 +2288,16 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         ),
         selectedIcon: Icon(Icons.forum),
         label: 'Messages',
+      ),
+      _Section.transactions => const NavigationDestination(
+        icon: Icon(Icons.receipt_long_outlined),
+        selectedIcon: Icon(Icons.receipt_long),
+        label: 'Transaction',
+      ),
+      _Section.market => const NavigationDestination(
+        icon: Icon(Icons.storefront_outlined),
+        selectedIcon: Icon(Icons.storefront),
+        label: 'Market',
       ),
       _Section.Notification => NavigationDestination(
         icon: Badge(
@@ -2307,6 +2352,40 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         deletingConversationIds: _deletingConversationIds,
       );
     }
+    if (_section == _Section.transactions) {
+      return _TransactionPage(
+        signedInRole: _signedInRole,
+        reservations: _reservations,
+        cancellingReservationIds: _cancellingReservationIds,
+        onCancelReservation: _cancelReservation,
+        orders: _orders,
+        deletingBuyerOrderIds: _deletingBuyerOrderIds,
+        onDeleteBuyerOrder: _deleteBuyerOrder,
+        onMessageOrderParticipant: _messageOrderParticipant,
+        onReviewVendor: _reviewVendor,
+        reviewedPurchaseKeys: _reviewedPurchaseKeys,
+        vendorOrders: _vendorOrders,
+        isLoadingVendorOrders: _isLoadingVendorOrders,
+        vendorOrdersError: _vendorOrdersError,
+        onRefreshVendorOrders: _loadVendorOrders,
+        onUpdateVendorOrder: _updateVendorOrder,
+        vendorAccount: _signedInVendorAccount,
+        ownListings: _listings
+            .where(
+              (listing) =>
+                  listing.isMine || listing.ownerEmail == _signedInEmail,
+            )
+            .toList(),
+        isLoadingListings: _isLoading,
+        listingsError: _loadError,
+        onRetryListings: _loadListings,
+        onPostProduce: _showNewListingForm,
+        onManageVendorLocation: _showMarketMap,
+        onDeleteListing: _deleteVendorListing,
+        onRepostListing: _repostVendorListing,
+        onEditListing: _editVendorListing,
+      );
+    }
     if (_section == _Section.cart) {
       if (_signedInRole != 'Buyer') {
         return const _BuyerOnlyMessage();
@@ -2317,7 +2396,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         onQuantityChanged: _updateCartQuantity,
         onRemove: (item) => _updateCartQuantity(item, 0),
         onCheckout: _checkoutCart,
-        onContinueShopping: () => _setSection(_Section.explore),
+        onContinueShopping: () => _setSection(_Section.market),
       );
     }
     if (_section == _Section.profile) {
@@ -2328,52 +2407,24 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         onChangeProfilePhoto: _changeProfilePhoto,
         isUpdatingProfilePhoto: _isUpdatingProfilePhoto,
         vendorAccount: _signedInVendorAccount,
-        ownListings: _signedInRole == 'Vendor'
-            ? _listings
-                  .where(
-                    (listing) =>
-                        listing.isMine || listing.ownerEmail == _signedInEmail,
-                  )
-                  .toList()
-            : const [],
-        isLoadingListings: _isLoading,
-        listingsError: _loadError,
-        onRetryListings: _loadListings,
         onSignIn: () => _showSignIn(),
         onVendorSignIn: () => _showSignIn(initialAccountType: 'Vendor'),
-        onPostProduce: _showNewListingForm,
-        onManageVendorLocation: _showMarketMap,
         onSignOut: _signOut,
-        onDeleteListing: _deleteVendorListing,
-        onRepostListing: _repostVendorListing,
-        onEditListing: _editVendorListing,
         vendorVerificationStatus: _vendorVerificationStatus,
         vendorTrustSummary: _vendorTrustSummary,
         onRefreshVendorTrust: () {
           _loadVendorVerificationStatus();
         },
         onRequestVendorVerification: _requestVendorVerification,
-        onBackToMarket: () => _setSection(_Section.explore),
-        reservations: _reservations,
-        cancellingReservationIds: _cancellingReservationIds,
-        onCancelReservation: _cancelReservation,
-        orders: _orders,
-        deletingBuyerOrderIds: _deletingBuyerOrderIds,
-        onDeleteBuyerOrder: _deleteBuyerOrder,
+        onBackToMarket: () => _setSection(_Section.market),
+        onOpenTransactions: () => _setSection(_Section.transactions),
         onOpenMessages: () async {
           await _setSection(_Section.messages);
         },
-        onMessageOrderParticipant: _messageOrderParticipant,
-        onReviewVendor: _reviewVendor,
-        reviewedPurchaseKeys: _reviewedPurchaseKeys,
-        onUpdateVendorOrder: _updateVendorOrder,
-        vendorOrders: _vendorOrders,
-        isLoadingVendorOrders: _isLoadingVendorOrders,
-        vendorOrdersError: _vendorOrdersError,
-        onRefreshVendorOrders: _loadVendorOrders,
       );
     }
     if (_section == _Section.nearby) return _buildNearbyPage();
+    if (_section == _Section.market) return _buildMarketPage();
     return _buildExplorePage();
   }
 
@@ -2431,45 +2482,49 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
                     label: const Text('Choose on map'),
                   ),
                   TextButton(
-                    onPressed: () => _setSection(_Section.explore),
+                    onPressed: () => _setSection(_Section.market),
                     child: const Text('Browse without distance sorting'),
                   ),
                 ],
               ),
               const SizedBox(height: 12),
               Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text('Search radius'),
-                  const SizedBox(width: 12),
-                  DropdownButton<double>(
-                    value: _nearbyRadiusKm,
-                    items: const [3.0, 10.0, 25.0, 50.0]
-                        .map(
-                          (radius) => DropdownMenuItem(
-                            value: radius,
-                            child: Text('${radius.toInt()} km'),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: _isLoadingNearby
-                        ? null
-                        : (radius) {
-                            if (radius == null) return;
-                            setState(() => _nearbyRadiusKm = radius);
-                            if (location != null) _loadNearbyAt(location);
-                          },
-                  ),
-                  if (location != null) ...[
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'Nearby results centered on your current location',
-                        style: const TextStyle(color: _muted, fontSize: 12),
-                      ),
+                  Text(
+                    '${_nearbyRadiusKm.round()} km',
+                    style: const TextStyle(
+                      color: _forest,
+                      fontWeight: FontWeight.w700,
                     ),
-                  ],
+                  ),
                 ],
               ),
+              Slider(
+                value: _nearbyRadiusKm,
+                min: 1,
+                max: 100,
+                divisions: 99,
+                label: '${_nearbyRadiusKm.round()} km',
+                semanticFormatterCallback: (value) =>
+                    '${value.round()} kilometers',
+                onChanged: _isLoadingNearby
+                    ? null
+                    : (radius) => setState(() => _nearbyRadiusKm = radius),
+                onChangeEnd: _isLoadingNearby
+                    ? null
+                    : (radius) {
+                        if (location != null) {
+                          unawaited(_loadNearbyAt(location));
+                        }
+                      },
+              ),
+              if (location != null)
+                Text(
+                  'Nearby results centered on your current location',
+                  style: const TextStyle(color: _muted, fontSize: 12),
+                ),
               if (_nearbyError != null)
                 Card(
                   color: const Color(0xFFFFF1ED),
@@ -2571,6 +2626,19 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   }
 
   Widget _buildExplorePage() {
+    return ListView(
+      padding: EdgeInsets.zero,
+      children: [
+        const _HeroSection(),
+        const _ExploreHighlights(),
+        if (_signedInRole != 'Vendor')
+          _VendorCallout(onStartSelling: _showNewListingForm),
+        const _MarketplaceFooter(),
+      ],
+    );
+  }
+
+  Widget _buildMarketPage() {
     if (_isLoading) {
       return const Center(
         child: Column(
@@ -2608,7 +2676,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     return ListView(
       padding: EdgeInsets.zero,
       children: [
-        const _HeroSection(),
         Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 1260),
@@ -2654,7 +2721,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
                           _availableOnly = true;
                           _favoritesOnly = false;
                           _sortOrder = 'Recommended';
-                          _section = _Section.explore;
+                          _section = _Section.market;
                         });
                       },
                     )
@@ -2712,8 +2779,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
             ),
           ),
         ),
-        if (_signedInRole != 'Vendor')
-          _VendorCallout(onStartSelling: _showNewListingForm),
         const _MarketplaceFooter(),
       ],
     );
@@ -2848,10 +2913,14 @@ class _MarketplaceHeader extends StatelessWidget {
     required this.isVendor,
     required this.isBuyer,
     required this.isSignedIn,
+    required this.canBrowseMarket,
     required this.signedInRole,
     required this.signedInAccount,
+    required this.unreadNotificationCount,
     required this.cartItemCount,
     required this.onOpenCart,
+    required this.onOpenNotification,
+    required this.onOpenMarket,
     required this.onPostProduce,
     required this.onSignIn,
   });
@@ -2860,10 +2929,14 @@ class _MarketplaceHeader extends StatelessWidget {
   final bool isVendor;
   final bool isBuyer;
   final bool isSignedIn;
+  final bool canBrowseMarket;
   final String? signedInRole;
   final MarketplaceAccount? signedInAccount;
+  final int unreadNotificationCount;
   final int cartItemCount;
   final VoidCallback onOpenCart;
+  final VoidCallback onOpenNotification;
+  final VoidCallback onOpenMarket;
   final VoidCallback onPostProduce;
   final VoidCallback onSignIn;
 
@@ -2925,6 +2998,12 @@ class _MarketplaceHeader extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (!compact && canBrowseMarket)
+                  IconButton(
+                    tooltip: 'Market',
+                    onPressed: onOpenMarket,
+                    icon: const Icon(Icons.storefront_outlined),
+                  ),
                 if (isSignedIn) ...[
                   if (isBuyer) ...[
                     IconButton(
@@ -2940,6 +3019,16 @@ class _MarketplaceHeader extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                   ],
+                  IconButton(
+                    tooltip: 'Notification',
+                    onPressed: onOpenNotification,
+                    icon: Badge(
+                      isLabelVisible: unreadNotificationCount > 0,
+                      label: Text('$unreadNotificationCount'),
+                      child: const Icon(Icons.notifications_none),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                 ],
                 if (isVendor) ...[
                   if (!compact)
@@ -3025,13 +3114,17 @@ class _HeroSection extends StatelessWidget {
           children: [
             Container(width: 38, height: 1, color: _leaf),
             const SizedBox(width: 12),
-            const Text(
-              'FRESH FROM YOUR NEIGHBORHOOD',
-              style: TextStyle(
-                color: _leaf,
-                fontSize: 12,
-                letterSpacing: 2.2,
-                fontWeight: FontWeight.w700,
+            const Expanded(
+              child: Text(
+                'FRESH FROM YOUR NEIGHBORHOOD',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: _leaf,
+                  fontSize: 12,
+                  letterSpacing: 2.2,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ],
@@ -3112,7 +3205,7 @@ class _HeroSection extends StatelessWidget {
                           style: TextStyle(fontWeight: FontWeight.w700),
                         ),
                         Text(
-                          'Browse vendor listings',
+                          'Fresh from your community',
                           style: TextStyle(fontSize: 12, color: _muted),
                         ),
                       ],
@@ -3141,6 +3234,122 @@ class _HeroSection extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ExploreHighlights extends StatelessWidget {
+  const _ExploreHighlights();
+
+  @override
+  Widget build(BuildContext context) {
+    const benefits = [
+      _ExploreBenefitCard(
+        icon: Icons.eco_outlined,
+        title: 'Fresh from local vendors',
+        description: 'Discover fruits and vegetables shared by growers and sellers in your community.',
+      ),
+      _ExploreBenefitCard(
+        icon: Icons.pin_drop_outlined,
+        title: 'Know where it comes from',
+        description: 'Check each listing’s location, availability, and condition before you choose.',
+      ),
+      _ExploreBenefitCard(
+        icon: Icons.favorite_border,
+        title: 'Support your community',
+        description: 'Shop directly from neighborhood vendors and help local businesses grow.',
+      ),
+    ];
+
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 1120),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 42, 24, 44),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const _SectionHeadingText(
+                eyebrow: 'A BETTER WAY TO SHOP LOCAL',
+                title: 'Good food, good neighbors.',
+                subtitle: 'Find fresh choices nearby and connect with the people who grow and sell them.',
+              ),
+              const SizedBox(height: 22),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final columns = constraints.maxWidth >= 820
+                      ? 3
+                      : constraints.maxWidth >= 540
+                      ? 2
+                      : 1;
+                  const gap = 14.0;
+                  final cardWidth =
+                      (constraints.maxWidth - gap * (columns - 1)) / columns;
+                  return Wrap(
+                    spacing: gap,
+                    runSpacing: gap,
+                    children: benefits
+                        .map(
+                          (benefit) =>
+                              SizedBox(width: cardWidth, child: benefit),
+                        )
+                        .toList(),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ExploreBenefitCard extends StatelessWidget {
+  const _ExploreBenefitCard({
+    required this.icon,
+    required this.title,
+    required this.description,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: _paper,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: const BoxDecoration(
+              color: Color(0xFFE9EFE5),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: _forest),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            title,
+            style: const TextStyle(
+              color: _deepForest,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(description, style: const TextStyle(color: _muted, height: 1.5)),
+        ],
       ),
     );
   }
@@ -3783,31 +3992,6 @@ class _EmptyListings extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _VendorInventoryMetric extends StatelessWidget {
-  const _VendorInventoryMetric({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          value,
-          style: const TextStyle(
-            color: _forest,
-            fontSize: 20,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        Text(label, style: const TextStyle(color: _muted, fontSize: 12)),
-      ],
     );
   }
 }
@@ -5153,6 +5337,29 @@ class _EditListingDialogState extends State<_EditListingDialog> {
   );
 }
 
+class _ListingDraft {
+  _ListingDraft({required String location})
+    : locationController = TextEditingController(text: location);
+
+  final nameController = TextEditingController();
+  final priceController = TextEditingController();
+  final quantityController = TextEditingController();
+  final TextEditingController locationController;
+  final descriptionController = TextEditingController();
+  Uint8List? imageBytes;
+  String? imageFileName;
+  String condition = 'Fresh';
+  String unit = 'kg';
+
+  void dispose() {
+    nameController.dispose();
+    priceController.dispose();
+    quantityController.dispose();
+    locationController.dispose();
+    descriptionController.dispose();
+  }
+}
+
 class _NewListingDialog extends StatefulWidget {
   const _NewListingDialog({
     required this.vendorEmail,
@@ -5174,35 +5381,56 @@ class _NewListingDialog extends StatefulWidget {
 
 class _NewListingDialogState extends State<_NewListingDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
-  final _priceController = TextEditingController();
-  final _quantityController = TextEditingController();
-  final _locationController = TextEditingController();
-  final _descriptionController = TextEditingController();
-  Uint8List? _imageBytes;
-  String? _imageFileName;
+  final List<_ListingDraft> _drafts = [];
   String? _formError;
-  String _condition = 'Fresh';
-  String _unit = 'kg';
+
+  TextEditingController get _nameController => _drafts.first.nameController;
+  TextEditingController get _priceController => _drafts.first.priceController;
+  TextEditingController get _quantityController =>
+      _drafts.first.quantityController;
+  TextEditingController get _locationController =>
+      _drafts.first.locationController;
+  TextEditingController get _descriptionController =>
+      _drafts.first.descriptionController;
+  Uint8List? get _imageBytes => _drafts.first.imageBytes;
+  set _imageBytes(Uint8List? value) => _drafts.first.imageBytes = value;
+  String? get _imageFileName => _drafts.first.imageFileName;
+  set _imageFileName(String? value) => _drafts.first.imageFileName = value;
+  String get _condition => _drafts.first.condition;
+  set _condition(String value) => _drafts.first.condition = value;
+  String get _unit => _drafts.first.unit;
+  set _unit(String value) => _drafts.first.unit = value;
 
   @override
   void initState() {
     super.initState();
-    _locationController.text = widget.vendorAddress;
+    _drafts.add(_ListingDraft(location: widget.vendorAddress));
   }
 
   @override
   void dispose() {
-    _nameController.dispose();
-    _priceController.dispose();
-    _quantityController.dispose();
-    _locationController.dispose();
-    _descriptionController.dispose();
+    for (final draft in _drafts) {
+      draft.dispose();
+    }
     super.dispose();
   }
 
-  Future<void> _pickImage() async {
+  void _addDraft() {
+    setState(() {
+      _drafts.add(_ListingDraft(location: widget.vendorAddress));
+      _formError = null;
+    });
+  }
+
+  void _removeDraft(int index) {
+    final removed = _drafts.removeAt(index);
+    removed.dispose();
+    setState(() => _formError = null);
+  }
+
+  Future<void> _pickImage([_ListingDraft? draft]) async {
     try {
+      final target = draft ?? _drafts.first;
       final result = await FilePicker.pickFiles(type: FileType.image);
       if (result.isEmpty) return;
       final file = result.single;
@@ -5223,8 +5451,8 @@ class _NewListingDialogState extends State<_NewListingDialog> {
       );
       if (!mounted) return;
       setState(() {
-        _imageBytes = compressedBytes;
-        _imageFileName = file.name;
+        target.imageBytes = compressedBytes;
+        target.imageFileName = file.name;
         _formError = null;
       });
     } catch (error) {
@@ -5246,38 +5474,43 @@ class _NewListingDialogState extends State<_NewListingDialog> {
       );
       return;
     }
-    final name = _nameController.text.trim();
-    final id = 'listing-${DateTime.now().microsecondsSinceEpoch}';
-    Navigator.of(context).pop(
-      ProduceListing(
-        id: id,
-        name: name,
-        category: _isFruit(name) ? 'Fruits' : 'Vegetables',
-        price: int.parse(_priceController.text.trim()),
-        unit: _unit,
-        quantity: _quantityController.text.trim(),
-        condition: _condition,
-        vendor: widget.vendorName,
-        vendorInitials: widget.vendorName
-            .trim()
-            .split(RegExp(r'\s+'))
-            .where((word) => word.isNotEmpty)
-            .take(2)
-            .map((word) => word[0].toUpperCase())
-            .join(),
-        location: _locationController.text.trim(),
-        ownerEmail: widget.vendorEmail,
-        imageUrl: '',
-        imageBytes: _imageBytes,
-        imageFileName: _imageFileName,
-        imageUrls: const [],
-        latitude: widget.vendorLatitude,
-        longitude: widget.vendorLongitude,
-        postedAt: DateTime.now(),
-        justPosted: true,
-        description: _descriptionController.text.trim(),
-      ),
-    );
+    final now = DateTime.now();
+    final listings = <ProduceListing>[];
+    for (var index = 0; index < _drafts.length; index++) {
+      final draft = _drafts[index];
+      final name = draft.nameController.text.trim();
+      listings.add(
+        ProduceListing(
+          id: 'listing-${now.microsecondsSinceEpoch}-$index',
+          name: name,
+          category: _isFruit(name) ? 'Fruits' : 'Vegetables',
+          price: int.parse(draft.priceController.text.trim()),
+          unit: draft.unit,
+          quantity: draft.quantityController.text.trim(),
+          condition: draft.condition,
+          vendor: widget.vendorName,
+          vendorInitials: widget.vendorName
+              .trim()
+              .split(RegExp(r'\s+'))
+              .where((word) => word.isNotEmpty)
+              .take(2)
+              .map((word) => word[0].toUpperCase())
+              .join(),
+          location: draft.locationController.text.trim(),
+          ownerEmail: widget.vendorEmail,
+          imageUrl: '',
+          imageBytes: draft.imageBytes,
+          imageFileName: draft.imageFileName,
+          imageUrls: const [],
+          latitude: widget.vendorLatitude,
+          longitude: widget.vendorLongitude,
+          postedAt: now,
+          justPosted: true,
+          description: draft.descriptionController.text.trim(),
+        ),
+      );
+    }
+    Navigator.of(context).pop(listings);
   }
 
   bool _isFruit(String name) {
@@ -5294,6 +5527,218 @@ class _NewListingDialogState extends State<_NewListingDialog> {
       'pineapple',
     ];
     return fruits.any(name.toLowerCase().contains);
+  }
+
+  Widget _buildListingDraftForm(_ListingDraft draft, int index) {
+    return Container(
+      key: ValueKey('listing-draft-$index'),
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F7F1),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Product ${index + 1}',
+                  style: const TextStyle(
+                    color: _deepForest,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              if (index > 0)
+                IconButton(
+                  tooltip: 'Remove product ${index + 1}',
+                  onPressed: () => _removeDraft(index),
+                  icon: const Icon(Icons.delete_outline),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _FormFieldLabel(
+            label: 'Produce name',
+            child: TextFormField(
+              controller: draft.nameController,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                hintText: 'e.g. Fresh Tomatoes',
+              ),
+              validator: (value) => value == null || value.trim().isEmpty
+                  ? 'Enter a produce name'
+                  : null,
+            ),
+          ),
+          const SizedBox(height: 14),
+          _FormFieldLabel(
+            label: 'Product photo (optional)',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _pickImage(draft),
+                  icon: const Icon(Icons.upload_outlined),
+                  label: Text(
+                    draft.imageFileName == null
+                        ? 'Choose image'
+                        : 'Change image',
+                  ),
+                ),
+                if (draft.imageBytes != null) ...[
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.memory(
+                      draft.imageBytes!,
+                      height: 140,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => setState(() {
+                      draft.imageBytes = null;
+                      draft.imageFileName = null;
+                    }),
+                    icon: const Icon(Icons.close),
+                    label: const Text('Remove image'),
+                  ),
+                ],
+                const Text(
+                  'Photos up to 5 MB are optimized and saved in Firestore with the listing.',
+                  style: TextStyle(color: _muted, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _FormFieldLabel(
+                  label: 'Price (₱)',
+                  child: TextFormField(
+                    controller: draft.priceController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(hintText: '40'),
+                    validator: (value) {
+                      final price = int.tryParse(value?.trim() ?? '');
+                      return price == null || price <= 0
+                          ? 'Enter a valid price'
+                          : null;
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _FormFieldLabel(
+                  label: 'Available quantity',
+                  child: TextFormField(
+                    controller: draft.quantityController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(hintText: '30'),
+                    validator: (value) {
+                      final quantity = int.tryParse(value?.trim() ?? '');
+                      return quantity == null || quantity < 1
+                          ? 'Enter a whole quantity greater than zero'
+                          : null;
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _FormFieldLabel(
+                  label: 'Condition',
+                  child: DropdownButtonFormField<String>(
+                    initialValue: draft.condition,
+                    isExpanded: true,
+                    items: const [
+                      DropdownMenuItem(value: 'Fresh', child: Text('Fresh')),
+                      DropdownMenuItem(
+                        value: 'Surplus',
+                        child: Text('Surplus'),
+                      ),
+                    ],
+                    onChanged: (value) =>
+                        setState(() => draft.condition = value ?? 'Fresh'),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _FormFieldLabel(
+                  label: 'Selling unit',
+                  child: DropdownButtonFormField<String>(
+                    initialValue: draft.unit,
+                    isExpanded: true,
+                    items: const [
+                      DropdownMenuItem(value: 'kg', child: Text('kg')),
+                      DropdownMenuItem(value: 'pcs', child: Text('pcs')),
+                      DropdownMenuItem(value: 'bundle', child: Text('bundle')),
+                      DropdownMenuItem(value: 'dozen', child: Text('dozen')),
+                    ],
+                    onChanged: (value) =>
+                        setState(() => draft.unit = value ?? 'kg'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _FormFieldLabel(
+            label: 'Pickup location (from vendor profile)',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextFormField(
+                  controller: draft.locationController,
+                  readOnly: true,
+                  decoration: const InputDecoration(
+                    suffixIcon: Icon(Icons.location_on_outlined),
+                  ),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Set an address on your vendor profile'
+                      : null,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  widget.vendorLatitude != null &&
+                          widget.vendorLongitude != null
+                      ? 'Map pin: ${widget.vendorLatitude!.toStringAsFixed(6)}, ${widget.vendorLongitude!.toStringAsFixed(6)}'
+                      : 'No exact map pin saved. Set your location from your vendor profile before posting.',
+                  style: const TextStyle(color: _muted, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          _FormFieldLabel(
+            label: 'Remarks',
+            child: TextFormField(
+              controller: draft.descriptionController,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                hintText:
+                    'Optional notes about quality, harvest date, and pickup',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -5348,7 +5793,7 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Choose an optional product photo from your device. The listing uses your saved vendor map pin and address.',
+                  'Fill in each product, tap Add another listing for more, then post them all together. Listings use your saved vendor map pin and address.',
                   style: TextStyle(color: _muted),
                 ),
                 if (_formError != null)
@@ -5360,6 +5805,15 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                     ),
                   ),
                 const SizedBox(height: 20),
+                const Text(
+                  'Product 1',
+                  style: TextStyle(
+                    color: _deepForest,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
                 _FormFieldLabel(
                   label: 'Produce name',
                   child: TextFormField(
@@ -5440,6 +5894,7 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                         label: 'Available quantity',
                         child: TextFormField(
                           controller: _quantityController,
+                          keyboardType: TextInputType.number,
                           decoration: const InputDecoration(hintText: '30'),
                           validator: (value) {
                             final quantity = int.tryParse(value?.trim() ?? '');
@@ -5467,10 +5922,6 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                               child: Text('Fresh'),
                             ),
                             DropdownMenuItem(
-                              value: 'Newly harvested',
-                              child: Text('Newly harvested'),
-                            ),
-                            DropdownMenuItem(
                               value: 'Surplus',
                               child: Text('Surplus'),
                             ),
@@ -5489,6 +5940,7 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                           isExpanded: true,
                           items: const [
                             DropdownMenuItem(value: 'kg', child: Text('kg')),
+                            DropdownMenuItem(value: 'pcs', child: Text('pcs')),
                             DropdownMenuItem(
                               value: 'bundle',
                               child: Text('bundle'),
@@ -5535,14 +5987,29 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                 ),
                 const SizedBox(height: 14),
                 _FormFieldLabel(
-                  label: 'Product description',
+                  label: 'Remarks',
                   child: TextFormField(
                     controller: _descriptionController,
                     maxLines: 3,
                     decoration: const InputDecoration(
-                      hintText:
-                          'Describe quality, harvest date, and pickup details',
+                      hintText: 'Optional notes about quality, harvest date, and pickup',
                     ),
+                  ),
+                ),
+                ..._drafts
+                    .asMap()
+                    .entries
+                    .skip(1)
+                    .map(
+                      (entry) => _buildListingDraftForm(entry.value, entry.key),
+                    ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _addDraft,
+                    icon: const Icon(Icons.add_circle_outline),
+                    label: const Text('Add another listing'),
                   ),
                 ),
                 const SizedBox(height: 20),
@@ -5550,8 +6017,12 @@ class _NewListingDialogState extends State<_NewListingDialog> {
                   width: double.infinity,
                   child: FilledButton.icon(
                     onPressed: _submit,
-                    icon: const Icon(Icons.arrow_forward, size: 18),
-                    label: const Text('POST'),
+                    icon: const Icon(Icons.publish_outlined, size: 18),
+                    label: Text(
+                      _drafts.length == 1
+                          ? 'POST LISTING'
+                          : 'POST ${_drafts.length} LISTINGS',
+                    ),
                   ),
                 ),
               ],
@@ -6275,6 +6746,732 @@ class _NotificationPage extends StatelessWidget {
   }
 }
 
+class _TransactionPage extends StatelessWidget {
+  const _TransactionPage({
+    required this.signedInRole,
+    required this.reservations,
+    required this.cancellingReservationIds,
+    required this.onCancelReservation,
+    required this.orders,
+    required this.deletingBuyerOrderIds,
+    required this.onDeleteBuyerOrder,
+    required this.onMessageOrderParticipant,
+    required this.onReviewVendor,
+    required this.reviewedPurchaseKeys,
+    required this.vendorOrders,
+    required this.isLoadingVendorOrders,
+    required this.vendorOrdersError,
+    required this.onRefreshVendorOrders,
+    required this.onUpdateVendorOrder,
+    required this.vendorAccount,
+    required this.ownListings,
+    required this.isLoadingListings,
+    required this.listingsError,
+    required this.onRetryListings,
+    required this.onPostProduce,
+    required this.onManageVendorLocation,
+    required this.onDeleteListing,
+    required this.onRepostListing,
+    required this.onEditListing,
+  });
+
+  final String? signedInRole;
+  final List<ProduceReservation> reservations;
+  final Set<String> cancellingReservationIds;
+  final ValueChanged<ProduceReservation> onCancelReservation;
+  final List<ProduceOrder> orders;
+  final Set<String> deletingBuyerOrderIds;
+  final ValueChanged<ProduceOrder> onDeleteBuyerOrder;
+  final Future<void> Function(ProduceOrder, MarketplaceCartItem)
+  onMessageOrderParticipant;
+  final Future<void> Function(ProduceOrder, MarketplaceCartItem) onReviewVendor;
+  final Set<String> reviewedPurchaseKeys;
+  final List<ProduceOrder> vendorOrders;
+  final bool isLoadingVendorOrders;
+  final Object? vendorOrdersError;
+  final VoidCallback onRefreshVendorOrders;
+  final Future<void> Function(ProduceOrder, String) onUpdateVendorOrder;
+  final MarketplaceAccount? vendorAccount;
+  final List<ProduceListing> ownListings;
+  final bool isLoadingListings;
+  final Object? listingsError;
+  final VoidCallback onRetryListings;
+  final VoidCallback onPostProduce;
+  final VoidCallback onManageVendorLocation;
+  final ValueChanged<ProduceListing> onDeleteListing;
+  final ValueChanged<ProduceListing> onRepostListing;
+  final ValueChanged<ProduceListing> onEditListing;
+
+  @override
+  Widget build(BuildContext context) {
+    if (signedInRole == 'Vendor') {
+      return _VendorTransactionsPage(
+        vendorOrders: vendorOrders,
+        isLoadingVendorOrders: isLoadingVendorOrders,
+        vendorOrdersError: vendorOrdersError,
+        onRefreshVendorOrders: onRefreshVendorOrders,
+        onMessageOrderParticipant: onMessageOrderParticipant,
+        onUpdateVendorOrder: onUpdateVendorOrder,
+        vendorAccount: vendorAccount,
+        ownListings: ownListings,
+        isLoadingListings: isLoadingListings,
+        listingsError: listingsError,
+        onRetryListings: onRetryListings,
+        onPostProduce: onPostProduce,
+        onManageVendorLocation: onManageVendorLocation,
+        onDeleteListing: onDeleteListing,
+        onRepostListing: onRepostListing,
+        onEditListing: onEditListing,
+      );
+    }
+
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 840),
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            const _SectionHeadingText(
+              eyebrow: 'YOUR ACCOUNT',
+              title: 'Transaction',
+              subtitle: 'Review your purchases and reservations.',
+            ),
+            const SizedBox(height: 22),
+            Text(
+              'My reservations (${reservations.length})',
+              style: TextStyle(
+                color: _deepForest,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            if (reservations.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  'No reservations yet.',
+                  style: TextStyle(color: _muted),
+                ),
+              )
+            else
+              ...reservations.map(
+                (reservation) => Card(
+                  color: _paper,
+                  elevation: 0,
+                  margin: const EdgeInsets.only(top: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: const BorderSide(color: _line),
+                  ),
+                  child: ListTile(
+                    leading: const Icon(
+                      Icons.event_available_outlined,
+                      color: _forest,
+                    ),
+                    title: Text(
+                      '${reservation.quantity} ${reservation.listing.unit} · ${reservation.listing.name}',
+                    ),
+                    subtitle: Text(
+                      'Pickup: ${reservation.listing.location} · ₱${reservation.total}',
+                    ),
+                    trailing: IconButton(
+                      tooltip: 'Cancel reservation',
+                      onPressed:
+                          cancellingReservationIds.contains(reservation.id)
+                          ? null
+                          : () => onCancelReservation(reservation),
+                      icon: cancellingReservationIds.contains(reservation.id)
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(
+                              Icons.cancel_outlined,
+                              color: Color(0xFF9D4038),
+                            ),
+                    ),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 22),
+            Text(
+              'My orders (${orders.length})',
+              style: TextStyle(
+                color: _deepForest,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            if (orders.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  'No purchases yet.',
+                  style: TextStyle(color: _muted),
+                ),
+              )
+            else
+              ...orders.map(
+                (order) => Card(
+                  color: _paper,
+                  elevation: 0,
+                  margin: const EdgeInsets.only(top: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: const BorderSide(color: _line),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Column(
+                      children: [
+                        ListTile(
+                          leading: const Icon(
+                            Icons.shopping_bag_outlined,
+                            color: _forest,
+                          ),
+                          title: Text(
+                            '${order.items.length} produce item(s) · ₱${order.total}',
+                          ),
+                          subtitle: Text(
+                            '${order.createdAt.toLocal().toString().split('.').first}\n'
+                            '${order.items.map((item) => '${item.listing.name}: ${item.status.isEmpty ? order.status : item.status}').join(', ')}',
+                          ),
+                          isThreeLine: true,
+                          trailing: IconButton(
+                            tooltip: 'Delete order',
+                            onPressed: deletingBuyerOrderIds.contains(order.id)
+                                ? null
+                                : () => onDeleteBuyerOrder(order),
+                            icon: deletingBuyerOrderIds.contains(order.id)
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.delete_outline,
+                                    color: Color(0xFF9D4038),
+                                  ),
+                          ),
+                        ),
+                        if (order.items.isNotEmpty)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Wrap(
+                              spacing: 8,
+                              children: order.items.map((item) {
+                                final vendorId =
+                                    item.listing.ownerEmail ??
+                                    item.listing.ownerUid ??
+                                    item.listing.vendor;
+                                final reviewKey =
+                                    '${order.id}:${vendorId.toLowerCase()}';
+                                final isCompleted =
+                                    item.status == 'completed' ||
+                                    (item.status.isEmpty &&
+                                        order.status == 'completed');
+                                return Wrap(
+                                  spacing: 4,
+                                  children: [
+                                    TextButton.icon(
+                                      onPressed: () =>
+                                          onMessageOrderParticipant(
+                                            order,
+                                            item,
+                                          ),
+                                      icon: const Icon(Icons.chat_outlined),
+                                      label: Text(
+                                        'Message ${item.listing.vendor}',
+                                      ),
+                                    ),
+                                    if (isCompleted &&
+                                        !reviewedPurchaseKeys.contains(
+                                          reviewKey,
+                                        ))
+                                      TextButton.icon(
+                                        onPressed: () =>
+                                            onReviewVendor(order, item),
+                                        icon: const Icon(Icons.star_outline),
+                                        label: Text(
+                                          'Review ${item.listing.vendor}',
+                                        ),
+                                      ),
+                                    if (isCompleted &&
+                                        reviewedPurchaseKeys.contains(
+                                          reviewKey,
+                                        ))
+                                      const Chip(
+                                        avatar: Icon(
+                                          Icons.check_circle_outline,
+                                          size: 16,
+                                        ),
+                                        label: Text('Reviewed'),
+                                        visualDensity: VisualDensity.compact,
+                                      ),
+                                  ],
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _VendorTransactionsPage extends StatefulWidget {
+  const _VendorTransactionsPage({
+    required this.vendorOrders,
+    required this.isLoadingVendorOrders,
+    required this.vendorOrdersError,
+    required this.onRefreshVendorOrders,
+    required this.onMessageOrderParticipant,
+    required this.onUpdateVendorOrder,
+    required this.vendorAccount,
+    required this.ownListings,
+    required this.isLoadingListings,
+    required this.listingsError,
+    required this.onRetryListings,
+    required this.onPostProduce,
+    required this.onManageVendorLocation,
+    required this.onDeleteListing,
+    required this.onRepostListing,
+    required this.onEditListing,
+  });
+
+  final List<ProduceOrder> vendorOrders;
+  final bool isLoadingVendorOrders;
+  final Object? vendorOrdersError;
+  final VoidCallback onRefreshVendorOrders;
+  final Future<void> Function(ProduceOrder, MarketplaceCartItem)
+  onMessageOrderParticipant;
+  final Future<void> Function(ProduceOrder, String) onUpdateVendorOrder;
+  final MarketplaceAccount? vendorAccount;
+  final List<ProduceListing> ownListings;
+  final bool isLoadingListings;
+  final Object? listingsError;
+  final VoidCallback onRetryListings;
+  final VoidCallback onPostProduce;
+  final VoidCallback onManageVendorLocation;
+  final ValueChanged<ProduceListing> onDeleteListing;
+  final ValueChanged<ProduceListing> onRepostListing;
+  final ValueChanged<ProduceListing> onEditListing;
+
+  @override
+  State<_VendorTransactionsPage> createState() =>
+      _VendorTransactionsPageState();
+}
+
+class _VendorTransactionsPageState extends State<_VendorTransactionsPage> {
+  bool _showDashboard = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = _showDashboard ? 'Store dashboard' : 'Transaction';
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 840),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 18, 24, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _SectionHeadingText(
+                      eyebrow: 'YOUR ACCOUNT',
+                      title: title,
+                      subtitle: _showDashboard
+                          ? 'Manage your store listings and inventory.'
+                          : 'Review and manage customer transactions.',
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: _showDashboard
+                        ? 'Customer orders'
+                        : 'Store dashboard',
+                    onPressed: () {
+                      setState(() => _showDashboard = !_showDashboard);
+                    },
+                    icon: Icon(
+                      _showDashboard
+                          ? Icons.receipt_long_outlined
+                          : Icons.storefront_outlined,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _showDashboard
+                  ? _VendorDashboardContent(
+                      vendorAccount: widget.vendorAccount,
+                      ownListings: widget.ownListings,
+                      isLoadingListings: widget.isLoadingListings,
+                      listingsError: widget.listingsError,
+                      onRetryListings: widget.onRetryListings,
+                      onPostProduce: widget.onPostProduce,
+                      onManageVendorLocation: widget.onManageVendorLocation,
+                      onDeleteListing: widget.onDeleteListing,
+                      onRepostListing: widget.onRepostListing,
+                      onEditListing: widget.onEditListing,
+                    )
+                  : _VendorOrdersContent(
+                      orders: widget.vendorOrders,
+                      isLoading: widget.isLoadingVendorOrders,
+                      error: widget.vendorOrdersError,
+                      onRefresh: widget.onRefreshVendorOrders,
+                      onMessageOrderParticipant:
+                          widget.onMessageOrderParticipant,
+                      onUpdateVendorOrder: widget.onUpdateVendorOrder,
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _VendorOrdersContent extends StatelessWidget {
+  const _VendorOrdersContent({
+    required this.orders,
+    required this.isLoading,
+    required this.error,
+    required this.onRefresh,
+    required this.onMessageOrderParticipant,
+    required this.onUpdateVendorOrder,
+  });
+
+  final List<ProduceOrder> orders;
+  final bool isLoading;
+  final Object? error;
+  final VoidCallback onRefresh;
+  final Future<void> Function(ProduceOrder, MarketplaceCartItem)
+  onMessageOrderParticipant;
+  final Future<void> Function(ProduceOrder, String) onUpdateVendorOrder;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Orders (${orders.length})',
+                style: const TextStyle(
+                  color: _deepForest,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Refresh orders',
+              onPressed: isLoading ? null : onRefresh,
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+        if (isLoading)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: CircularProgressIndicator(color: _forest),
+            ),
+          )
+        else if (error != null)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Could not load orders: $error',
+                style: const TextStyle(color: Color(0xFF9D4038)),
+              ),
+              TextButton.icon(
+                onPressed: onRefresh,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Try again'),
+              ),
+            ],
+          )
+        else if (orders.isEmpty)
+          const Text(
+            'No customer transactions yet.',
+            style: TextStyle(color: _muted),
+          )
+        else
+          ...orders.map(
+            (order) => Card(
+              color: _paper,
+              elevation: 0,
+              margin: const EdgeInsets.only(bottom: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: const BorderSide(color: _line),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ListTile(
+                      leading: const Icon(
+                        Icons.shopping_bag_outlined,
+                        color: _forest,
+                      ),
+                      title: Text(
+                        '${order.items.map((item) => '${item.quantity} ${item.listing.unit} ${item.listing.name}').join(', ')} · ₱${order.total}',
+                      ),
+                      subtitle: Text(
+                        'Buyer: ${order.buyerEmail}\n'
+                        '${order.status} · ${order.createdAt.toLocal().toString().split('.').first}',
+                      ),
+                      isThreeLine: true,
+                    ),
+                    Wrap(
+                      spacing: 8,
+                      children: order.items.map((item) {
+                        return TextButton.icon(
+                          onPressed: () =>
+                              onMessageOrderParticipant(order, item),
+                          icon: const Icon(Icons.chat_outlined),
+                          label: const Text('Message buyer'),
+                        );
+                      }).toList(),
+                    ),
+                    if (order.status == 'pending_vendor_confirmation')
+                      OverflowBar(
+                        children: [
+                          OutlinedButton(
+                            onPressed: () =>
+                                onUpdateVendorOrder(order, 'declined'),
+                            child: const Text('Decline'),
+                          ),
+                          FilledButton.icon(
+                            onPressed: () =>
+                                onUpdateVendorOrder(order, 'approved'),
+                            icon: const Icon(Icons.check),
+                            label: const Text('Approve'),
+                          ),
+                        ],
+                      ),
+                    if (order.status == 'approved')
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: FilledButton.tonalIcon(
+                          onPressed: () =>
+                              onUpdateVendorOrder(order, 'completed'),
+                          icon: const Icon(Icons.task_alt_outlined),
+                          label: const Text('Mark completed'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _VendorDashboardContent extends StatelessWidget {
+  const _VendorDashboardContent({
+    required this.vendorAccount,
+    required this.ownListings,
+    required this.isLoadingListings,
+    required this.listingsError,
+    required this.onRetryListings,
+    required this.onPostProduce,
+    required this.onManageVendorLocation,
+    required this.onDeleteListing,
+    required this.onRepostListing,
+    required this.onEditListing,
+  });
+
+  final MarketplaceAccount? vendorAccount;
+  final List<ProduceListing> ownListings;
+  final bool isLoadingListings;
+  final Object? listingsError;
+  final VoidCallback onRetryListings;
+  final VoidCallback onPostProduce;
+  final VoidCallback onManageVendorLocation;
+  final ValueChanged<ProduceListing> onDeleteListing;
+  final ValueChanged<ProduceListing> onRepostListing;
+  final ValueChanged<ProduceListing> onEditListing;
+
+  @override
+  Widget build(BuildContext context) {
+    final companyName = vendorAccount?.companyName;
+    final unitsInStock = ownListings.fold<int>(
+      0,
+      (total, listing) => total + (int.tryParse(listing.quantity.trim()) ?? 0),
+    );
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+      children: [
+        if (companyName != null && companyName.trim().isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Text(companyName, style: const TextStyle(color: _muted)),
+          ),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            FilledButton.icon(
+              onPressed: onPostProduce,
+              icon: const Icon(Icons.add),
+              label: const Text('Post produce'),
+            ),
+            OutlinedButton.icon(
+              onPressed: onManageVendorLocation,
+              icon: const Icon(Icons.map_outlined),
+              label: const Text('Manage map'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        Card(
+          color: const Color(0xFFE9EFE5),
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Row(
+              children: [
+                const Icon(Icons.inventory_2_outlined, color: _forest),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Units in stock',
+                    style: const TextStyle(
+                      color: _deepForest,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                Text(
+                  '$unitsInStock',
+                  style: const TextStyle(
+                    color: _deepForest,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Your listings (${ownListings.length})',
+                style: const TextStyle(
+                  color: _deepForest,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Refresh listings',
+              onPressed: isLoadingListings ? null : onRetryListings,
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+        if (isLoadingListings)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: CircularProgressIndicator(color: _forest),
+            ),
+          )
+        else if (listingsError != null)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Could not load listings: $listingsError',
+                style: const TextStyle(color: Color(0xFF9D4038)),
+              ),
+              TextButton.icon(
+                onPressed: onRetryListings,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Try again'),
+              ),
+            ],
+          )
+        else if (ownListings.isEmpty)
+          const Text(
+            'No listings yet. Post produce to start selling.',
+            style: TextStyle(color: _muted),
+          )
+        else
+          ...ownListings.map(
+            (listing) => Card(
+              color: _paper,
+              elevation: 0,
+              margin: const EdgeInsets.only(bottom: 10),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+                side: const BorderSide(color: _line),
+              ),
+              child: ListTile(
+                leading: const Icon(Icons.eco_outlined, color: _forest),
+                title: Text(listing.name),
+                subtitle: Text(
+                  '${listing.quantity} ${listing.unit} · ${listing.priceLabel}/${listing.unit}',
+                ),
+                trailing: PopupMenuButton<String>(
+                  tooltip: 'Listing actions',
+                  onSelected: (action) {
+                    switch (action) {
+                      case 'edit':
+                        onEditListing(listing);
+                        break;
+                      case 'repost':
+                        onRepostListing(listing);
+                        break;
+                      case 'delete':
+                        onDeleteListing(listing);
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(value: 'edit', child: Text('Edit listing')),
+                    PopupMenuItem(
+                      value: 'repost',
+                      child: Text('Repost listing'),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Delete listing'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _WelcomeBenefit extends StatelessWidget {
   const _WelcomeBenefit({
     required this.icon,
@@ -6957,38 +8154,16 @@ class _ProfilePage extends StatelessWidget {
     required this.onChangeProfilePhoto,
     required this.isUpdatingProfilePhoto,
     required this.vendorAccount,
-    required this.ownListings,
-    required this.isLoadingListings,
-    required this.listingsError,
-    required this.onRetryListings,
     required this.onSignIn,
     required this.onVendorSignIn,
-    required this.onPostProduce,
-    required this.onManageVendorLocation,
     required this.onSignOut,
-    required this.onDeleteListing,
-    required this.onRepostListing,
-    required this.onEditListing,
     required this.vendorVerificationStatus,
     required this.vendorTrustSummary,
     required this.onRefreshVendorTrust,
     required this.onRequestVendorVerification,
     required this.onBackToMarket,
-    required this.reservations,
-    required this.cancellingReservationIds,
-    required this.onCancelReservation,
-    required this.orders,
-    required this.deletingBuyerOrderIds,
-    required this.onDeleteBuyerOrder,
+    required this.onOpenTransactions,
     required this.onOpenMessages,
-    required this.onMessageOrderParticipant,
-    required this.onReviewVendor,
-    required this.reviewedPurchaseKeys,
-    required this.onUpdateVendorOrder,
-    required this.vendorOrders,
-    required this.isLoadingVendorOrders,
-    required this.vendorOrdersError,
-    required this.onRefreshVendorOrders,
   });
 
   final String? signedInRole;
@@ -6997,39 +8172,16 @@ class _ProfilePage extends StatelessWidget {
   final VoidCallback onChangeProfilePhoto;
   final bool isUpdatingProfilePhoto;
   final MarketplaceAccount? vendorAccount;
-  final List<ProduceListing> ownListings;
-  final bool isLoadingListings;
-  final Object? listingsError;
-  final VoidCallback onRetryListings;
   final VoidCallback onSignIn;
   final VoidCallback onVendorSignIn;
-  final VoidCallback onPostProduce;
-  final VoidCallback onManageVendorLocation;
   final VoidCallback onSignOut;
-  final ValueChanged<ProduceListing> onDeleteListing;
-  final ValueChanged<ProduceListing> onRepostListing;
-  final ValueChanged<ProduceListing> onEditListing;
   final String vendorVerificationStatus;
   final VendorTrustSummary vendorTrustSummary;
   final VoidCallback onRefreshVendorTrust;
   final VoidCallback onRequestVendorVerification;
   final VoidCallback onBackToMarket;
-  final List<ProduceReservation> reservations;
-  final Set<String> cancellingReservationIds;
-  final ValueChanged<ProduceReservation> onCancelReservation;
-  final List<ProduceOrder> orders;
-  final Set<String> deletingBuyerOrderIds;
-  final ValueChanged<ProduceOrder> onDeleteBuyerOrder;
+  final VoidCallback onOpenTransactions;
   final VoidCallback onOpenMessages;
-  final Future<void> Function(ProduceOrder, MarketplaceCartItem)
-  onMessageOrderParticipant;
-  final Future<void> Function(ProduceOrder, MarketplaceCartItem) onReviewVendor;
-  final Set<String> reviewedPurchaseKeys;
-  final Future<void> Function(ProduceOrder, String) onUpdateVendorOrder;
-  final List<ProduceOrder> vendorOrders;
-  final bool isLoadingVendorOrders;
-  final Object? vendorOrdersError;
-  final VoidCallback onRefreshVendorOrders;
 
   @override
   Widget build(BuildContext context) {
@@ -7126,7 +8278,7 @@ class _ProfilePage extends StatelessWidget {
                     signedInRole == null
                         ? 'Join your local market'
                         : signedInRole == 'Vendor'
-                        ? 'Store dashboard'
+                        ? 'Vendor account'
                         : 'Buyer account',
                     style: TextStyle(
                       color: _deepForest,
@@ -7167,25 +8319,7 @@ class _ProfilePage extends StatelessWidget {
                     ),
                   ],
                   const SizedBox(height: 18),
-                  if (signedInRole == 'Vendor') ...[
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: onPostProduce,
-                        icon: const Icon(Icons.add),
-                        label: const Text('Post produce'),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: onManageVendorLocation,
-                        icon: const Icon(Icons.map_outlined),
-                        label: const Text('Manage map location'),
-                      ),
-                    ),
-                  ] else if (signedInRole == null) ...[
+                  if (signedInRole == null) ...[
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton(
@@ -7201,6 +8335,15 @@ class _ProfilePage extends StatelessWidget {
                     ),
                   ],
                   if (signedInRole != null) ...[
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: onOpenTransactions,
+                        icon: const Icon(Icons.receipt_long_outlined),
+                        label: const Text('View transactions'),
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     SizedBox(
                       width: double.infinity,
@@ -7348,466 +8491,6 @@ class _ProfilePage extends StatelessWidget {
                         ),
                       ),
                     ),
-                  ],
-                  if (signedInRole == 'Buyer') ...[
-                    const Divider(height: 32),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'My reservations (${reservations.length})',
-                        style: const TextStyle(
-                          color: _deepForest,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    if (reservations.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Text(
-                          'No reservations yet.',
-                          style: TextStyle(color: _muted),
-                        ),
-                      )
-                    else
-                      ...reservations.map(
-                        (reservation) => ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: const Icon(
-                            Icons.event_available_outlined,
-                            color: _forest,
-                          ),
-                          title: Text(
-                            '${reservation.quantity} ${reservation.listing.unit} · ${reservation.listing.name}',
-                          ),
-                          subtitle: Text(
-                            'Pickup: ${reservation.listing.location} · ₱${reservation.total}',
-                          ),
-                          trailing: IconButton(
-                            tooltip: 'Cancel reservation',
-                            onPressed:
-                                cancellingReservationIds.contains(
-                                  reservation.id,
-                                )
-                                ? null
-                                : () => onCancelReservation(reservation),
-                            icon:
-                                cancellingReservationIds.contains(
-                                  reservation.id,
-                                )
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.cancel_outlined,
-                                    color: Color(0xFF9D4038),
-                                  ),
-                          ),
-                        ),
-                      ),
-                    const SizedBox(height: 12),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'My orders (${orders.length})',
-                        style: const TextStyle(
-                          color: _deepForest,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    if (orders.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Text(
-                          'No purchases yet.',
-                          style: TextStyle(color: _muted),
-                        ),
-                      )
-                    else
-                      ...orders.map(
-                        (order) => Column(
-                          children: [
-                            ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: const Icon(
-                                Icons.shopping_bag_outlined,
-                                color: _forest,
-                              ),
-                              title: Text(
-                                '${order.items.length} produce item(s) · ₱${order.total}',
-                              ),
-                              subtitle: Text(
-                                '${order.createdAt.toLocal().toString().split('.').first}\n'
-                                '${order.items.map((item) => '${item.listing.name}: ${item.status.isEmpty ? order.status : item.status}').join(', ')}',
-                              ),
-                              trailing: IconButton(
-                                tooltip: 'Delete order',
-                                onPressed:
-                                    deletingBuyerOrderIds.contains(order.id)
-                                    ? null
-                                    : () => onDeleteBuyerOrder(order),
-                                icon: deletingBuyerOrderIds.contains(order.id)
-                                    ? const SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : const Icon(
-                                        Icons.delete_outline,
-                                        color: Color(0xFF9D4038),
-                                      ),
-                              ),
-                            ),
-                            if (order.items.isNotEmpty)
-                              Align(
-                                alignment: Alignment.centerLeft,
-                                child: Wrap(
-                                  spacing: 8,
-                                  children: order.items.map((item) {
-                                    final vendorId =
-                                        item.listing.ownerEmail ??
-                                        item.listing.ownerUid ??
-                                        item.listing.vendor;
-                                    final reviewKey =
-                                        '${order.id}:${vendorId.toLowerCase()}';
-                                    final isCompleted =
-                                        item.status == 'completed' ||
-                                        (item.status.isEmpty &&
-                                            order.status == 'completed');
-                                    return Wrap(
-                                      spacing: 4,
-                                      children: [
-                                        TextButton.icon(
-                                          onPressed: () =>
-                                              onMessageOrderParticipant(
-                                                order,
-                                                item,
-                                              ),
-                                          icon: const Icon(Icons.chat_outlined),
-                                          label: Text(
-                                            'Message ${item.listing.vendor}',
-                                          ),
-                                        ),
-                                        if (isCompleted &&
-                                            !reviewedPurchaseKeys.contains(
-                                              reviewKey,
-                                            ))
-                                          TextButton.icon(
-                                            onPressed: () =>
-                                                onReviewVendor(order, item),
-                                            icon: const Icon(
-                                              Icons.star_outline,
-                                            ),
-                                            label: Text(
-                                              'Review ${item.listing.vendor}',
-                                            ),
-                                          ),
-                                        if (isCompleted &&
-                                            reviewedPurchaseKeys.contains(
-                                              reviewKey,
-                                            ))
-                                          const Chip(
-                                            avatar: Icon(
-                                              Icons.check_circle_outline,
-                                              size: 16,
-                                            ),
-                                            label: Text('Reviewed'),
-                                            visualDensity:
-                                                VisualDensity.compact,
-                                          ),
-                                      ],
-                                    );
-                                  }).toList(),
-                                ),
-                              ),
-                            const Divider(),
-                          ],
-                        ),
-                      ),
-                  ],
-                  if (signedInRole == 'Vendor') ...[
-                    const Divider(height: 32),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Orders (${vendorOrders.length})',
-                            style: const TextStyle(
-                              color: _deepForest,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Refresh orders',
-                          onPressed: isLoadingVendorOrders
-                              ? null
-                              : onRefreshVendorOrders,
-                          icon: const Icon(Icons.refresh),
-                        ),
-                      ],
-                    ),
-                    if (isLoadingVendorOrders)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 14),
-                        child: Column(
-                          children: [
-                            LinearProgressIndicator(color: _forest),
-                            SizedBox(height: 10),
-                            Text(
-                              'Loading customer orders…',
-                              style: TextStyle(color: _muted),
-                            ),
-                          ],
-                        ),
-                      )
-                    else if (vendorOrdersError != null)
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Could not load orders: $vendorOrdersError',
-                            style: const TextStyle(color: Color(0xFF9D4038)),
-                          ),
-                          TextButton.icon(
-                            onPressed: onRefreshVendorOrders,
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('Try again'),
-                          ),
-                        ],
-                      )
-                    else if (vendorOrders.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Text(
-                          'No customers have ordered your produce yet.',
-                          style: TextStyle(color: _muted),
-                        ),
-                      )
-                    else
-                      ...vendorOrders.map(
-                        (order) => Card(
-                          color: const Color(0xFFF4F6F0),
-                          elevation: 0,
-                          child: Padding(
-                            padding: const EdgeInsets.all(8),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                ListTile(
-                                  leading: const Icon(
-                                    Icons.shopping_bag_outlined,
-                                    color: _forest,
-                                  ),
-                                  title: Text(
-                                    '${order.items.map((item) => '${item.quantity} ${item.listing.unit} ${item.listing.name}').join(', ')} · ₱${order.total}',
-                                  ),
-                                  subtitle: Text(
-                                    'Buyer: ${order.buyerEmail}\n'
-                                    '${order.status} · ${order.createdAt.toLocal().toString().split('.').first}',
-                                  ),
-                                  isThreeLine: true,
-                                ),
-                                Wrap(
-                                  spacing: 8,
-                                  children: order.items.map((item) {
-                                    return TextButton.icon(
-                                      onPressed: () =>
-                                          onMessageOrderParticipant(
-                                            order,
-                                            item,
-                                          ),
-                                      icon: const Icon(Icons.chat_outlined),
-                                      label: const Text('Message buyer'),
-                                    );
-                                  }).toList(),
-                                ),
-                                if (order.status ==
-                                    'pending_vendor_confirmation')
-                                  OverflowBar(
-                                    children: [
-                                      OutlinedButton(
-                                        onPressed: () => onUpdateVendorOrder(
-                                          order,
-                                          'declined',
-                                        ),
-                                        child: const Text('Decline'),
-                                      ),
-                                      FilledButton.icon(
-                                        onPressed: () => onUpdateVendorOrder(
-                                          order,
-                                          'approved',
-                                        ),
-                                        icon: const Icon(Icons.check),
-                                        label: const Text('Approve'),
-                                      ),
-                                    ],
-                                  ),
-                                if (order.status == 'approved')
-                                  Align(
-                                    alignment: Alignment.centerRight,
-                                    child: FilledButton.tonalIcon(
-                                      onPressed: () => onUpdateVendorOrder(
-                                        order,
-                                        'completed',
-                                      ),
-                                      icon: const Icon(Icons.task_alt_outlined),
-                                      label: const Text('Mark completed'),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    const Divider(height: 32),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Store dashboard',
-                        style: const TextStyle(
-                          color: _deepForest,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    if (isLoadingListings)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 14),
-                        child: Column(
-                          children: [
-                            LinearProgressIndicator(color: _forest),
-                            SizedBox(height: 10),
-                            Text(
-                              'Loading your inventory…',
-                              style: TextStyle(color: _muted),
-                            ),
-                          ],
-                        ),
-                      )
-                    else if (listingsError != null)
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Could not load inventory: $listingsError',
-                            style: const TextStyle(color: Color(0xFF9D4038)),
-                          ),
-                          TextButton.icon(
-                            onPressed: onRetryListings,
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('Retry'),
-                          ),
-                        ],
-                      )
-                    else ...[
-                      Card(
-                        color: const Color(0xFFF4F6F0),
-                        elevation: 0,
-                        child: Padding(
-                          padding: const EdgeInsets.all(14),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: _VendorInventoryMetric(
-                                  label: 'Listings',
-                                  value: '${ownListings.length}',
-                                ),
-                              ),
-                              Expanded(
-                                child: _VendorInventoryMetric(
-                                  label: 'Units in stock',
-                                  value:
-                                      '${ownListings.fold<int>(0, (total, listing) => total + (int.tryParse(listing.quantity) ?? 0))}',
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          'My listings (${ownListings.length})',
-                          style: const TextStyle(
-                            color: _deepForest,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      if (ownListings.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 12),
-                          child: Text(
-                            'You have not posted any produce yet.',
-                            style: TextStyle(color: _muted),
-                          ),
-                        )
-                      else
-                        ...ownListings.map(
-                          (listing) => ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: CircleAvatar(
-                              backgroundColor: const Color(0xFFE9EFE5),
-                              backgroundImage: listing.imageBytes == null
-                                  ? null
-                                  : MemoryImage(listing.imageBytes!),
-                              child: listing.imageBytes == null
-                                  ? const Icon(
-                                      Icons.eco_outlined,
-                                      color: _forest,
-                                    )
-                                  : null,
-                            ),
-                            title: Text(
-                              listing.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            subtitle: Text(
-                              '${listing.priceLabel}/${listing.unit} · ${listing.inventoryLabel}',
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  tooltip:
-                                      'Edit price and stock for ${listing.name}',
-                                  onPressed: () => onEditListing(listing),
-                                  color: _forest,
-                                  icon: const Icon(Icons.edit_outlined),
-                                ),
-                                IconButton(
-                                  tooltip: 'Repost ${listing.name}',
-                                  onPressed: () => onRepostListing(listing),
-                                  color: _forest,
-                                  icon: const Icon(Icons.repeat),
-                                ),
-                                IconButton(
-                                  tooltip: 'Delete ${listing.name}',
-                                  onPressed: () => onDeleteListing(listing),
-                                  color: const Color(0xFF9D4038),
-                                  icon: const Icon(Icons.delete_outline),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                    ],
                   ],
                 ],
               ),

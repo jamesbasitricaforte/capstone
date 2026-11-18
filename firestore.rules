@@ -5,12 +5,8 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function emailVerified() {
-      return signedIn() && request.auth.token.email_verified == true;
-    }
-
     function isVendor(userId) {
-      return emailVerified()
+      return signedIn()
         && request.auth.uid == userId
         && exists(/databases/$(database)/documents/users/$(userId))
         && get(/databases/$(database)/documents/users/$(userId)).data.role
@@ -18,7 +14,7 @@ service cloud.firestore {
     }
 
     function isBuyer(userId) {
-      return emailVerified()
+      return signedIn()
         && request.auth.uid == userId
         && exists(/databases/$(database)/documents/users/$(userId))
         && get(/databases/$(database)/documents/users/$(userId)).data.role
@@ -681,7 +677,7 @@ service cloud.firestore {
     }
 
     match /marketplace_transactions/{transactionId} {
-      allow read: if emailVerified()
+      allow read: if signedIn()
         && (
           resource.data.buyer_uid == request.auth.uid
           || resource.data.vendor_uid == request.auth.uid

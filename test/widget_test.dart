@@ -32,6 +32,16 @@ Future<void> registerBuyer(
   await tester.pumpAndSettle();
 }
 
+Future<void> openMarketFromExplore(WidgetTester tester) async {
+  final desktopMarketButton = find.byTooltip('Market');
+  if (desktopMarketButton.evaluate().isNotEmpty) {
+    await tester.tap(desktopMarketButton);
+  } else {
+    await tester.tap(find.text('Market').last);
+  }
+  await tester.pumpAndSettle();
+}
+
 class _VendorRoleRepository extends InMemoryMarketplaceRepository {
   @override
   Future<MarketplaceAccount> signIn(MarketplaceCredentials credentials) async {
@@ -511,6 +521,50 @@ void main() {
     expect(find.text('Your cart is empty'), findsOneWidget);
   });
 
+  testWidgets('transaction and market tabs open their respective pages', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final repository = InMemoryMarketplaceRepository()
+      ..setAuthenticatedAccount(
+        const MarketplaceAccount(
+          id: 'buyer-navigation',
+          role: 'Buyer',
+          email: 'buyer@example.com',
+        ),
+      );
+    addTearDown(repository.dispose);
+
+    await tester.pumpWidget(MyApp(repository: repository));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    expect(find.text('Transaction'), findsOneWidget);
+    expect(find.text('Market'), findsOneWidget);
+
+    await tester.tap(find.text('Transaction'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(
+      find.text('Review your purchases and reservations.'),
+      findsOneWidget,
+    );
+    expect(find.text('No purchases yet.'), findsOneWidget);
+
+    await tester.tap(find.text('Market'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
+      4,
+    );
+    expect(find.text('Market'), findsOneWidget);
+  });
+
   testWidgets('map location picker fits a compact phone screen', (
     tester,
   ) async {
@@ -722,15 +776,24 @@ void main() {
     expect(find.byTooltip('Account: Vendor'), findsOneWidget);
     expect(find.text('Cart'), findsNothing);
     expect(find.byTooltip('Post produce'), findsOneWidget);
+    expect(find.text('Profile'), findsNothing);
+    expect(find.text('Notification'), findsNothing);
 
-    await tester.tap(find.text('Profile'));
+    await tester.tap(find.byTooltip('Account: Vendor'));
     await tester.pumpAndSettle();
-    expect(find.text('Store dashboard'), findsWidgets);
-    expect(find.text('Units in stock'), findsOneWidget);
+    expect(find.text('Vendor account'), findsOneWidget);
+    expect(find.text('Store dashboard'), findsNothing);
+    expect(find.text('Units in stock'), findsNothing);
+    await tester.tap(find.widgetWithText(OutlinedButton, 'View transactions'));
+    await tester.pumpAndSettle();
     expect(find.text('Orders (1)'), findsOneWidget);
     expect(find.textContaining('Buyer: buyer@example.com'), findsOneWidget);
     expect(find.textContaining('Fresh Tomatoes'), findsWidgets);
-    expect(find.text('Sales'), findsNothing);
+    await tester.tap(find.byTooltip('Store dashboard'));
+    await tester.pumpAndSettle();
+    expect(find.text('Store dashboard'), findsOneWidget);
+    expect(find.text('Units in stock'), findsOneWidget);
+    expect(find.text('Orders (1)'), findsNothing);
   });
 
   testWidgets('vendor cannot sign in when buyer account type is selected', (
@@ -803,8 +866,17 @@ void main() {
     await registerBuyer(tester);
 
     expect(find.textContaining('Good food grows'), findsOneWidget);
+    expect(find.text('Search tomatoes, mangoes, pechay...'), findsNothing);
+    expect(find.text('Good food, good neighbors.'), findsOneWidget);
+    expect(find.text('Browse the market'), findsNothing);
+    expect(find.text('Open Market'), findsNothing);
+    await openMarketFromExplore(tester);
     expect(find.text('Search tomatoes, mangoes, pechay...'), findsOneWidget);
     expect(find.text('Fresh Tomatoes'), findsWidgets);
+    expect(
+      find.text('Bring your local produce to nearby buyers.'),
+      findsNothing,
+    );
     expect(find.text('Ripe Carabao Mangoes'), findsOneWidget);
     expect(find.text('180+'), findsNothing);
     expect(find.text('2.4t'), findsNothing);
@@ -839,6 +911,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: repository));
     await tester.pumpAndSettle();
 
+    await openMarketFromExplore(tester);
     expect(find.text('Fresh Tomatoes'), findsWidgets);
     expect(find.text('We couldn’t load the market listings.'), findsNothing);
     expect(find.textContaining('Could not load notifications'), findsOneWidget);
@@ -888,16 +961,20 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final notificationDestination = find.ancestor(
-      of: find.text('Notification'),
-      matching: find.byType(NavigationDestination),
+    final notificationButton = find.byTooltip('Notification');
+    expect(notificationButton, findsOneWidget);
+    expect(
+      find.ancestor(
+        of: notificationButton,
+        matching: find.byType(NavigationDestination),
+      ),
+      findsNothing,
     );
-    expect(notificationDestination, findsOneWidget);
     expect(
       tester
           .widget<Badge>(
             find.descendant(
-              of: notificationDestination,
+              of: notificationButton,
               matching: find.byType(Badge),
             ),
           )
@@ -905,7 +982,7 @@ void main() {
       isTrue,
     );
     expect(
-      find.descendant(of: notificationDestination, matching: find.text('1')),
+      find.descendant(of: notificationButton, matching: find.text('1')),
       findsOneWidget,
     );
   });
@@ -927,6 +1004,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    await openMarketFromExplore(tester);
 
     expect(
       find.byWidgetPredicate(
@@ -959,6 +1037,7 @@ void main() {
 
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    await openMarketFromExplore(tester);
     await tester.tap(find.widgetWithText(FilterChip, 'Nearby'));
     await tester.pumpAndSettle();
     expect(locationService.requestCount, 0);
@@ -1001,6 +1080,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    await openMarketFromExplore(tester);
     await tester.tap(find.widgetWithText(FilterChip, 'Nearby'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Use my location'));
@@ -1036,6 +1116,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    await openMarketFromExplore(tester);
     await tester.tap(find.widgetWithText(FilterChip, 'Nearby'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Use my location'));
@@ -1066,13 +1147,23 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    await openMarketFromExplore(tester);
     await tester.tap(find.widgetWithText(FilterChip, 'Nearby'));
     await tester.pumpAndSettle();
+    final radiusSlider = find.byType(Slider);
+    expect(tester.widget<Slider>(radiusSlider).max, 100);
+    final sliderRect = tester.getRect(radiusSlider);
+    await tester.dragFrom(
+      Offset(sliderRect.left + 24, sliderRect.center.dy),
+      Offset(sliderRect.width, 0),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('100 km'), findsOneWidget);
     await tester.tap(find.text('Use my location'));
     await tester.pumpAndSettle();
 
     expect(repository.requestedLocation, const LatLng(14.5, 120.9));
-    expect(repository.requestedRadius, 10);
+    expect(repository.requestedRadius, 100);
     expect(find.text('Nearby pechay'), findsOneWidget);
     expect(find.textContaining('0.6 km'), findsOneWidget);
   });
@@ -1089,6 +1180,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    expect(find.text('Search tomatoes, mangoes, pechay...'), findsNothing);
+    expect(find.text('Fresh Tomatoes'), findsNothing);
+    await openMarketFromExplore(tester);
 
     expect(
       find.text(
@@ -1104,6 +1198,7 @@ void main() {
     expect(find.text('Browse as guest'), findsOneWidget);
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    await openMarketFromExplore(tester);
     expect(find.text('Search tomatoes, mangoes, pechay...'), findsOneWidget);
 
     await tester.ensureVisible(find.byTooltip('Save listing').first);
@@ -1151,6 +1246,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
     await registerBuyer(tester);
+    await openMarketFromExplore(tester);
 
     await tester.tap(find.text('View produce').first);
     await tester.pumpAndSettle();
@@ -1171,6 +1267,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
     await registerBuyer(tester);
+    await openMarketFromExplore(tester);
 
     await tester.tap(find.text("Aling Rosa's Produce").first);
     await tester.pumpAndSettle();
@@ -1193,6 +1290,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: repository));
     await tester.pumpAndSettle();
     await registerBuyer(tester);
+    await openMarketFromExplore(tester);
 
     await tester.tap(find.text('Guest Store').first);
     await tester.pumpAndSettle();
@@ -1221,6 +1319,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Browse as guest'));
     await tester.pumpAndSettle();
+    await openMarketFromExplore(tester);
 
     expect(
       find.byWidgetPredicate(
@@ -1255,6 +1354,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: _ReviewedListingRepository()));
     await tester.pumpAndSettle();
     await registerBuyer(tester);
+    await openMarketFromExplore(tester);
 
     await tester.tap(find.text('View produce').first);
     await tester.pumpAndSettle();
@@ -1282,6 +1382,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
     await registerBuyer(tester);
+    await openMarketFromExplore(tester);
     await tester.tap(find.text('View produce').first);
     await tester.pumpAndSettle();
     final rateButton = find.ancestor(
@@ -1318,6 +1419,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
     await registerBuyer(tester);
+    await openMarketFromExplore(tester);
 
     await tester.tap(find.text('View produce').first);
     await tester.pumpAndSettle();
@@ -1344,6 +1446,9 @@ void main() {
 
     await tester.tap(find.byTooltip('Account: Buyer'));
     await tester.pumpAndSettle();
+    expect(find.text('My orders (1)'), findsNothing);
+    await tester.tap(find.widgetWithText(OutlinedButton, 'View transactions'));
+    await tester.pumpAndSettle();
     expect(find.text('My orders (1)'), findsOneWidget);
 
     final deleteOrderButton = find.byTooltip('Delete order');
@@ -1367,6 +1472,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
     await registerBuyer(tester);
+    await openMarketFromExplore(tester);
     await tester.tap(find.text('View produce').first);
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Increase quantity'));
@@ -1379,6 +1485,9 @@ void main() {
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Account: Buyer'));
+    await tester.pumpAndSettle();
+    expect(find.text('My reservations (1)'), findsNothing);
+    await tester.tap(find.widgetWithText(OutlinedButton, 'View transactions'));
     await tester.pumpAndSettle();
     expect(find.text('My reservations (1)'), findsOneWidget);
     expect(find.textContaining('2 kg · Fresh Tomatoes'), findsOneWidget);
@@ -1400,6 +1509,7 @@ void main() {
     await tester.pumpWidget(MyApp(repository: InMemoryMarketplaceRepository()));
     await tester.pumpAndSettle();
     await registerBuyer(tester, email: 'direct-buy@example.com');
+    await openMarketFromExplore(tester);
     await tester.tap(find.text('View produce').first);
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('Buy now'));
@@ -1412,6 +1522,8 @@ void main() {
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Account: Buyer'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(OutlinedButton, 'View transactions'));
     await tester.pumpAndSettle();
     expect(find.text('My orders (1)'), findsOneWidget);
   });
@@ -1475,6 +1587,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Fresh picks from local vendors'), findsOneWidget);
     expect(find.text('Search tomatoes, mangoes, pechay...'), findsOneWidget);
+    expect(find.text('Good food grows'), findsNothing);
   });
 
   testWidgets('sign out clears the local account and returns to welcome', (
@@ -1523,6 +1636,7 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       await tester.pumpAndSettle();
 
+      await openMarketFromExplore(tester);
       final deleteButton = find.byTooltip(
         'Delete listing: Other vendor produce',
       );
@@ -1709,6 +1823,86 @@ void main() {
     expect(find.text('Hosted product photo URL (optional)'), findsNothing);
     expect(find.text('Add photos'), findsNothing);
     expect(find.text('Add videos (0/10)'), findsNothing);
+  });
+
+  testWidgets('vendors can add and post multiple listings together', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 2200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final repository = InMemoryMarketplaceRepository();
+    addTearDown(repository.dispose);
+    repository.setAuthenticatedAccount(
+      const MarketplaceAccount(
+        id: 'bulk-vendor',
+        role: 'Vendor',
+        email: 'bulk-vendor@example.com',
+        companyName: 'Bulk Farm',
+        addressLine1: 'Farm Road',
+        latitude: 8.5,
+        longitude: 123.8,
+      ),
+    );
+
+    await tester.pumpWidget(MyApp(repository: repository));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Post produce'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Remarks'), findsOneWidget);
+    expect(find.text('Product description'), findsNothing);
+    final unitDropdowns = find.byType(DropdownButtonFormField<String>);
+    await tester.tap(unitDropdowns.at(0));
+    await tester.pumpAndSettle();
+    expect(find.text('Newly harvested'), findsNothing);
+    await tester.tap(find.text('Fresh').last);
+    await tester.pumpAndSettle();
+    await tester.tap(unitDropdowns.at(1));
+    await tester.pumpAndSettle();
+    expect(find.text('pcs'), findsOneWidget);
+    await tester.tap(find.text('pcs'));
+    await tester.pumpAndSettle();
+
+    final fields = find.byType(TextFormField);
+    TextInputType? keyboardTypeFor(Finder formField) {
+      final textField = find.descendant(
+        of: formField,
+        matching: find.byType(TextField),
+      );
+      return tester.widget<TextField>(textField).keyboardType;
+    }
+
+    expect(keyboardTypeFor(fields.at(2)), TextInputType.number);
+    await tester.enterText(fields.at(0), 'Tomatoes');
+    await tester.enterText(fields.at(1), '40');
+    await tester.enterText(fields.at(2), '5');
+    await tester.ensureVisible(find.text('Add another listing'));
+    await tester.tap(find.text('Add another listing'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Product 2'), findsOneWidget);
+    expect(find.text('POST 2 LISTINGS'), findsOneWidget);
+    expect(keyboardTypeFor(fields.at(7)), TextInputType.number);
+    await tester.ensureVisible(find.text('Product 2'));
+    await tester.enterText(fields.at(5), 'Mangoes');
+    await tester.enterText(fields.at(6), '60');
+    await tester.enterText(fields.at(7), '8');
+    await tester.ensureVisible(find.text('POST 2 LISTINGS'));
+    await tester.tap(find.text('POST 2 LISTINGS'));
+    await tester.pumpAndSettle();
+
+    final listings = await repository.loadListings();
+    expect(
+      listings.map((listing) => listing.name),
+      containsAll(['Tomatoes', 'Mangoes']),
+    );
+    expect(
+      listings.singleWhere((listing) => listing.name == 'Tomatoes').unit,
+      'pcs',
+    );
   });
 
   testWidgets('sign in and create account show a brief success transition', (
