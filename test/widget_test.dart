@@ -45,12 +45,14 @@ Future<void> openMarketFromExplore(WidgetTester tester) async {
 class _VendorRoleRepository extends InMemoryMarketplaceRepository {
   @override
   Future<MarketplaceAccount> signIn(MarketplaceCredentials credentials) async {
-    return const MarketplaceAccount(
+    const account = MarketplaceAccount(
       id: 'vendor-1',
       role: 'Vendor',
       email: 'vendor@example.com',
       companyName: 'Green Basket',
     );
+    setAuthenticatedAccount(account);
+    return account;
   }
 
   @override
@@ -780,6 +782,24 @@ void main() {
     expect(find.text('Profile'), findsNothing);
     expect(find.text('Notification'), findsNothing);
 
+    await openMarketFromExplore(tester);
+    await tester.tap(find.text('View produce').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add to cart'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Shopping cart (1 items)'), findsOneWidget);
+    await tester.tap(find.byTooltip('Shopping cart (1 items)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Checkout'), findsOneWidget);
+    await tester.tap(find.text('Checkout'));
+    await tester.pumpAndSettle();
+    expect(find.text('Place order'), findsOneWidget);
+    await tester.tap(find.text('Place order'));
+    await tester.pumpAndSettle();
+    expect(find.text('Order placed'), findsOneWidget);
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
     await tester.tap(find.byTooltip('Account: Vendor'));
     await tester.pumpAndSettle();
     expect(find.text('Vendor account'), findsOneWidget);
@@ -791,6 +811,13 @@ void main() {
     expect(find.byTooltip('Remove vendor transaction'), findsOneWidget);
     expect(find.textContaining('Buyer: buyer@example.com'), findsOneWidget);
     expect(find.textContaining('Fresh Tomatoes'), findsWidgets);
+    await tester.tap(find.byTooltip('My purchases'));
+    await tester.pumpAndSettle();
+    expect(find.text('My purchases'), findsOneWidget);
+    expect(find.text('Orders (1)'), findsOneWidget);
+    expect(find.textContaining('Vendor:'), findsOneWidget);
+    await tester.tap(find.byTooltip('Customer orders'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Store dashboard'));
     await tester.pumpAndSettle();
     expect(find.text('Store dashboard'), findsOneWidget);

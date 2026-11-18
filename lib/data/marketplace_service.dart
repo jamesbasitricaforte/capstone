@@ -403,6 +403,7 @@ class MarketplaceService {
         MarketplaceCartItem(
           listing: _withAvailableQuantity(_sampleListings[index]),
           quantity: entry.value,
+          vendorUid: _sampleListings[index].ownerUid,
         ),
       );
     }
@@ -416,6 +417,7 @@ class MarketplaceService {
   }) async {
     _validateQuantity(quantity);
     final currentListing = _findListing(listing.id);
+    _ensureNotOwnListing(buyerEmail, currentListing);
     final cart = _buyerCarts.putIfAbsent(buyerEmail, () => {});
     final updatedQuantity = (cart[listing.id] ?? 0) + quantity;
     if (updatedQuantity > availableQuantity(currentListing)) {
@@ -431,6 +433,7 @@ class MarketplaceService {
   }) async {
     _validateQuantity(quantity);
     final listing = _findListing(listingId);
+    _ensureNotOwnListing(buyerEmail, listing);
     if (quantity > availableQuantity(listing)) {
       throw StateError('The requested quantity is not available.');
     }
@@ -451,6 +454,7 @@ class MarketplaceService {
     required int quantity,
   }) async {
     _validateQuantity(quantity);
+    _ensureNotOwnListing(buyerEmail, listing);
     _decrementInventory(listing.id, quantity);
     final reservation = ProduceReservation(
       id: 'reservation-${DateTime.now().microsecondsSinceEpoch}',
@@ -478,6 +482,7 @@ class MarketplaceService {
     required int quantity,
   }) async {
     _validateQuantity(quantity);
+    _ensureNotOwnListing(buyerEmail, listing);
     _decrementInventory(listing.id, quantity);
     final order = ProduceOrder(
       id: 'order-${DateTime.now().microsecondsSinceEpoch}',
@@ -514,6 +519,7 @@ class MarketplaceService {
 
     final cartItems = await loadCart(buyerEmail);
     for (final item in cartItems) {
+      _ensureNotOwnListing(buyerEmail, item.listing);
       if (item.quantity > availableQuantity(item.listing)) {
         throw StateError(
           'The available quantity for ${item.listing.name} has changed.',
@@ -1042,6 +1048,7 @@ class MarketplaceService {
       imageBytes: listing.imageBytes,
       imageFileName: listing.imageFileName,
       pendingMedia: listing.pendingMedia,
+      ownerUid: listing.ownerUid,
       latitude: listing.latitude,
       longitude: listing.longitude,
       postedAt: listing.postedAt,
@@ -1056,6 +1063,15 @@ class MarketplaceService {
   void _validateQuantity(int quantity) {
     if (quantity < 1) {
       throw ArgumentError.value(quantity, 'quantity', 'Must be at least 1.');
+    }
+  }
+
+  void _ensureNotOwnListing(String buyerEmail, ProduceListing listing) {
+    final normalizedBuyer = buyerEmail.trim().toLowerCase();
+    final actualListing = _findListing(listing.id);
+    if (actualListing.ownerEmail?.trim().toLowerCase() == normalizedBuyer ||
+        actualListing.ownerUid?.trim().toLowerCase() == normalizedBuyer) {
+      throw StateError('You cannot purchase your own listing.');
     }
   }
 

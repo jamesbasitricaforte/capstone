@@ -796,14 +796,14 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
 
   @override
   Future<List<MarketplaceCartItem>> loadCart() =>
-      _service.loadCart(_requireBuyer().email);
+      _service.loadCart(_requirePurchaser().email);
 
   @override
   Future<void> addToCart({
     required ProduceListing listing,
     required int quantity,
   }) => _service.addToCart(
-    buyerEmail: _requireBuyer().email,
+    buyerEmail: _requirePurchaser().email,
     listing: listing,
     quantity: quantity,
   );
@@ -813,21 +813,24 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
     required String listingId,
     required int quantity,
   }) => _service.updateCartQuantity(
-    buyerEmail: _requireBuyer().email,
+    buyerEmail: _requirePurchaser().email,
     listingId: listingId,
     quantity: quantity,
   );
 
   @override
-  Future<void> removeFromCart({required String listingId}) => _service
-      .removeFromCart(buyerEmail: _requireBuyer().email, listingId: listingId);
+  Future<void> removeFromCart({required String listingId}) =>
+      _service.removeFromCart(
+        buyerEmail: _requirePurchaser().email,
+        listingId: listingId,
+      );
 
   @override
   Future<ProduceReservation> reserveListing({
     required ProduceListing listing,
     required int quantity,
   }) => _service.reserveListing(
-    buyerEmail: _requireBuyer().email,
+    buyerEmail: _requirePurchaser().email,
     listing: listing,
     quantity: quantity,
   );
@@ -837,33 +840,36 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
     required ProduceListing listing,
     required int quantity,
   }) => _service.buyListing(
-    buyerEmail: _requireBuyer().email,
+    buyerEmail: _requirePurchaser().email,
     listing: listing,
     quantity: quantity,
   );
 
   @override
   Future<ProduceOrder> checkoutCart() =>
-      _service.checkoutCart(_requireBuyer().email);
+      _service.checkoutCart(_requirePurchaser().email);
 
   @override
   Future<List<ProduceReservation>> loadReservations() async =>
-      _service.reservationsFor(_requireBuyer().email);
+      _service.reservationsFor(_requirePurchaser().email);
 
   @override
   Future<bool> cancelReservation({required String reservationId}) async =>
       _service.cancelReservation(
-        buyerEmail: _requireBuyer().email,
+        buyerEmail: _requirePurchaser().email,
         reservationId: reservationId,
       );
 
   @override
   Future<List<ProduceOrder>> loadOrders() async =>
-      _service.ordersFor(_requireBuyer().email);
+      _service.ordersFor(_requirePurchaser().email);
 
   @override
-  Future<bool> deleteBuyerOrder({required String orderId}) async => _service
-      .hideOrderForBuyer(orderId: orderId, buyerEmail: _requireBuyer().email);
+  Future<bool> deleteBuyerOrder({required String orderId}) async =>
+      _service.hideOrderForBuyer(
+        orderId: orderId,
+        buyerEmail: _requirePurchaser().email,
+      );
 
   @override
   Future<List<ProduceOrder>> loadVendorOrders() async =>
@@ -1101,6 +1107,16 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
     final account = _requireAccount();
     if (account.role != 'Buyer') {
       throw const MarketplaceApiException('A buyer account is required.');
+    }
+    return account;
+  }
+
+  MarketplaceAccount _requirePurchaser() {
+    final account = _requireAccount();
+    if (account.role != 'Buyer' && account.role != 'Vendor') {
+      throw const MarketplaceApiException(
+        'A buyer or vendor account is required.',
+      );
     }
     return account;
   }

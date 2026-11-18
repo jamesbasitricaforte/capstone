@@ -393,7 +393,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         if (account.role == 'Vendor') _watchVendorNotifications();
       }
       await _loadListings();
-      if (account != null && account.role == 'Buyer') {
+      if (account != null &&
+          (account.role == 'Buyer' || account.role == 'Vendor')) {
         try {
           await _loadBuyerData();
         } catch (error) {
@@ -402,9 +403,10 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
             SnackBar(content: Text('Could not load your account data: $error')),
           );
         }
-      } else if (account != null && account.role == 'Vendor') {
-        await _loadVendorOrders();
-        await _loadVendorVerificationStatus();
+        if (account.role == 'Vendor') {
+          await _loadVendorOrders();
+          await _loadVendorVerificationStatus();
+        }
       }
       if (account != null) {
         await _loadConversations();
@@ -672,11 +674,11 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       };
       if (!await _requestAccountAccess(action: action) || !mounted) return;
     }
-    if (section == _Section.cart && _signedInRole != 'Buyer') {
+    if (section == _Section.cart &&
+        _signedInRole != 'Buyer' &&
+        _signedInRole != 'Vendor') {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('The cart is available to buyer accounts.'),
-        ),
+        const SnackBar(content: Text('Sign in to use the shopping cart.')),
       );
       return;
     }
@@ -746,7 +748,9 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       _signedInAccount = account;
       _signedInVendorAccount = account.role == 'Vendor' ? account : null;
       _isGuestBrowsing = false;
-      if (account.role != 'Buyer' && _section == _Section.cart) {
+      if (account.role != 'Buyer' &&
+          account.role != 'Vendor' &&
+          _section == _Section.cart) {
         _section = _Section.explore;
       }
     });
@@ -757,8 +761,11 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     await _loadListings();
     var accountDataLoaded = true;
     try {
-      if (account.role == 'Buyer') {
+      if (account.role == 'Buyer' || account.role == 'Vendor') {
         await _loadBuyerData();
+        if (account.role == 'Vendor') {
+          await _loadVendorOrders();
+        }
       } else {
         setState(() {
           _savedListingIds.clear();
@@ -768,9 +775,6 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
           _orders = [];
           _vendorOrders = [];
         });
-        if (account.role == 'Vendor') {
-          await _loadVendorOrders();
-        }
       }
       await _loadConversations();
     } on MarketplaceApiException catch (error) {
@@ -804,7 +808,9 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     final cart = await _service.loadCart();
     final reservations = await _service.loadReservations();
     final orders = await _service.loadOrders();
-    final favorites = await _service.loadFavorites();
+    final favorites = _signedInRole == 'Buyer'
+        ? await _service.loadFavorites()
+        : <String>{};
     if (!mounted) return;
     setState(() {
       _cartItems = cart;
@@ -1238,7 +1244,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     ProduceOrder order,
     MarketplaceCartItem item,
   ) async {
-    final userIsBuyer = _signedInRole == 'Buyer';
+    final userIsBuyer =
+        _signedInRole == 'Buyer' || order.buyerUid == _signedInUserId;
     final otherUserId = userIsBuyer ? item.vendorUid : order.buyerUid;
     if (otherUserId == null || otherUserId.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1746,7 +1753,10 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         listing: listing,
         availableQuantity: _service.availableQuantity(listing),
         trustSummary: trust,
-        canPurchase: _signedInRole != 'Vendor',
+        canPurchase:
+            _signedInRole != 'Vendor' ||
+            (listing.ownerUid != _signedInUserId &&
+                listing.ownerEmail != _signedInEmail),
         canReviewStore: _signedInRole == 'Buyer',
         currentBuyerId: _signedInUserId,
         currentBuyerEmail: _signedInEmail,
@@ -1829,7 +1839,10 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   }
 
   Future<void> _refreshBuyerCart() async {
-    if (_signedInRole != 'Buyer' || _signedInEmail == null) return;
+    if ((_signedInRole != 'Buyer' && _signedInRole != 'Vendor') ||
+        _signedInEmail == null) {
+      return;
+    }
     final cart = await _service.loadCart();
     if (!mounted) return;
     setState(() => _cartItems = cart);
@@ -1900,6 +1913,14 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     return _requestAccountAccess(action: action, buyerOnly: true);
   }
 
+  Future<bool> _ensurePurchaserAccess({required String action}) async {
+    if ((_signedInRole == 'Buyer' || _signedInRole == 'Vendor') &&
+        _signedInEmail != null) {
+      return true;
+    }
+    return _requestAccountAccess(action: action);
+  }
+
   Future<void> _toggleSavedListing(ProduceListing listing) async {
     if (!await _ensureBuyerAccess(action: 'save a favorite')) return;
     final saved = !_savedListingIds.contains(listing.id);
@@ -1931,7 +1952,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   }
 
   Future<bool> _addToCart(ProduceListing listing, int quantity) async {
-    if (!await _ensureBuyerAccess(action: 'add produce to your cart')) {
+    if (!await _ensurePurchaserAccess(action: 'add produce to your cart')) {
       return false;
     }
     try {
@@ -1952,7 +1973,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   }
 
   Future<void> _reserveListing(ProduceListing listing, int quantity) async {
-    if (!await _ensureBuyerAccess(action: 'reserve produce') || !mounted) {
+    if (!await _ensurePurchaserAccess(action: 'reserve produce') || !mounted) {
       return;
     }
     try {
@@ -1991,7 +2012,9 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   }
 
   Future<void> _buyNow(ProduceListing listing, int quantity) async {
-    if (!await _ensureBuyerAccess(action: 'place an order') || !mounted) return;
+    if (!await _ensurePurchaserAccess(action: 'place an order') || !mounted) {
+      return;
+    }
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -2039,7 +2062,10 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     int quantity,
   ) async {
     final email = _signedInEmail;
-    if (email == null || _signedInRole != 'Buyer') return;
+    if (email == null ||
+        (_signedInRole != 'Buyer' && _signedInRole != 'Vendor')) {
+      return;
+    }
     try {
       if (quantity < 1) {
         await _service.removeFromCart(listingId: item.listing.id);
@@ -2059,7 +2085,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   }
 
   Future<void> _checkoutCart() async {
-    if (!await _ensureBuyerAccess(action: 'place an order') ||
+    if (!await _ensurePurchaserAccess(action: 'place an order') ||
         !mounted ||
         _cartItems.isEmpty) {
       return;
@@ -2270,7 +2296,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
             _MarketplaceHeader(
               compact: isMobile,
               isVendor: _signedInRole == 'Vendor',
-              isBuyer: _signedInRole == 'Buyer',
+              canShop: _signedInRole == 'Buyer' || _signedInRole == 'Vendor',
               isSignedIn: _signedInRole != null,
               canBrowseMarket: _signedInRole != null || _isGuestBrowsing,
               signedInRole: _signedInRole,
@@ -2413,6 +2439,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         cancellingReservationIds: _cancellingReservationIds,
         onCancelReservation: _cancelReservation,
         orders: _orders,
+        onRefreshPurchases: _loadBuyerData,
         deletingBuyerOrderIds: _deletingBuyerOrderIds,
         onDeleteBuyerOrder: _deleteBuyerOrder,
         onMessageOrderParticipant: _messageOrderParticipant,
@@ -2443,7 +2470,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       );
     }
     if (_section == _Section.cart) {
-      if (_signedInRole != 'Buyer') {
+      if (_signedInRole != 'Buyer' && _signedInRole != 'Vendor') {
         return const _BuyerOnlyMessage();
       }
       return _CartPage(
@@ -2967,7 +2994,7 @@ class _MarketplaceHeader extends StatelessWidget {
   const _MarketplaceHeader({
     required this.compact,
     required this.isVendor,
-    required this.isBuyer,
+    required this.canShop,
     required this.isSignedIn,
     required this.canBrowseMarket,
     required this.signedInRole,
@@ -2983,7 +3010,7 @@ class _MarketplaceHeader extends StatelessWidget {
 
   final bool compact;
   final bool isVendor;
-  final bool isBuyer;
+  final bool canShop;
   final bool isSignedIn;
   final bool canBrowseMarket;
   final String? signedInRole;
@@ -3061,7 +3088,7 @@ class _MarketplaceHeader extends StatelessWidget {
                     icon: const Icon(Icons.storefront_outlined),
                   ),
                 if (isSignedIn) ...[
-                  if (isBuyer) ...[
+                  if (canShop) ...[
                     IconButton(
                       tooltip: cartItemCount == 0
                           ? 'Shopping cart'
@@ -6809,6 +6836,7 @@ class _TransactionPage extends StatelessWidget {
     required this.cancellingReservationIds,
     required this.onCancelReservation,
     required this.orders,
+    required this.onRefreshPurchases,
     required this.deletingBuyerOrderIds,
     required this.onDeleteBuyerOrder,
     required this.onMessageOrderParticipant,
@@ -6838,6 +6866,7 @@ class _TransactionPage extends StatelessWidget {
   final Set<String> cancellingReservationIds;
   final ValueChanged<ProduceReservation> onCancelReservation;
   final List<ProduceOrder> orders;
+  final VoidCallback onRefreshPurchases;
   final Set<String> deletingBuyerOrderIds;
   final ValueChanged<ProduceOrder> onDeleteBuyerOrder;
   final Future<void> Function(ProduceOrder, MarketplaceCartItem)
@@ -6866,6 +6895,13 @@ class _TransactionPage extends StatelessWidget {
   Widget build(BuildContext context) {
     if (signedInRole == 'Vendor') {
       return _VendorTransactionsPage(
+        purchases: orders,
+        reservations: reservations,
+        cancellingReservationIds: cancellingReservationIds,
+        onCancelReservation: onCancelReservation,
+        deletingPurchaseIds: deletingBuyerOrderIds,
+        onDeletePurchase: onDeleteBuyerOrder,
+        onRefreshPurchases: onRefreshPurchases,
         vendorOrders: vendorOrders,
         isLoadingVendorOrders: isLoadingVendorOrders,
         vendorOrdersError: vendorOrdersError,
@@ -7092,6 +7128,13 @@ class _TransactionPage extends StatelessWidget {
 
 class _VendorTransactionsPage extends StatefulWidget {
   const _VendorTransactionsPage({
+    required this.purchases,
+    required this.reservations,
+    required this.cancellingReservationIds,
+    required this.onCancelReservation,
+    required this.deletingPurchaseIds,
+    required this.onDeletePurchase,
+    required this.onRefreshPurchases,
     required this.vendorOrders,
     required this.isLoadingVendorOrders,
     required this.vendorOrdersError,
@@ -7112,6 +7155,13 @@ class _VendorTransactionsPage extends StatefulWidget {
     required this.onEditListing,
   });
 
+  final List<ProduceOrder> purchases;
+  final List<ProduceReservation> reservations;
+  final Set<String> cancellingReservationIds;
+  final ValueChanged<ProduceReservation> onCancelReservation;
+  final Set<String> deletingPurchaseIds;
+  final ValueChanged<ProduceOrder> onDeletePurchase;
+  final VoidCallback onRefreshPurchases;
   final List<ProduceOrder> vendorOrders;
   final bool isLoadingVendorOrders;
   final Object? vendorOrdersError;
@@ -7139,10 +7189,15 @@ class _VendorTransactionsPage extends StatefulWidget {
 
 class _VendorTransactionsPageState extends State<_VendorTransactionsPage> {
   bool _showDashboard = false;
+  bool _showPurchases = false;
 
   @override
   Widget build(BuildContext context) {
-    final title = _showDashboard ? 'Store dashboard' : 'Transaction';
+    final title = _showDashboard
+        ? 'Store dashboard'
+        : _showPurchases
+        ? 'My purchases'
+        : 'Transaction';
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 840),
@@ -7158,15 +7213,34 @@ class _VendorTransactionsPageState extends State<_VendorTransactionsPage> {
                       title: title,
                       subtitle: _showDashboard
                           ? 'Manage your store listings and inventory.'
+                          : _showPurchases
+                          ? 'Review the orders and reservations you made.'
                           : 'Review and manage customer transactions.',
                     ),
                   ),
+                  if (!_showDashboard)
+                    IconButton(
+                      tooltip: _showPurchases
+                          ? 'Customer orders'
+                          : 'My purchases',
+                      onPressed: () {
+                        setState(() => _showPurchases = !_showPurchases);
+                      },
+                      icon: Icon(
+                        _showPurchases
+                            ? Icons.receipt_long_outlined
+                            : Icons.shopping_bag_outlined,
+                      ),
+                    ),
                   IconButton(
                     tooltip: _showDashboard
                         ? 'Customer orders'
                         : 'Store dashboard',
                     onPressed: () {
-                      setState(() => _showDashboard = !_showDashboard);
+                      setState(() {
+                        _showDashboard = !_showDashboard;
+                        _showPurchases = false;
+                      });
                     },
                     icon: Icon(
                       _showDashboard
@@ -7191,6 +7265,16 @@ class _VendorTransactionsPageState extends State<_VendorTransactionsPage> {
                       onRepostListing: widget.onRepostListing,
                       onEditListing: widget.onEditListing,
                     )
+                  : _showPurchases
+                  ? _VendorPurchasesContent(
+                      purchases: widget.purchases,
+                      reservations: widget.reservations,
+                      cancellingReservationIds: widget.cancellingReservationIds,
+                      onCancelReservation: widget.onCancelReservation,
+                      deletingPurchaseIds: widget.deletingPurchaseIds,
+                      onDeletePurchase: widget.onDeletePurchase,
+                      onRefresh: widget.onRefreshPurchases,
+                    )
                   : _VendorOrdersContent(
                       orders: widget.vendorOrders,
                       isLoading: widget.isLoadingVendorOrders,
@@ -7206,6 +7290,129 @@ class _VendorTransactionsPageState extends State<_VendorTransactionsPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _VendorPurchasesContent extends StatelessWidget {
+  const _VendorPurchasesContent({
+    required this.purchases,
+    required this.reservations,
+    required this.cancellingReservationIds,
+    required this.onCancelReservation,
+    required this.deletingPurchaseIds,
+    required this.onDeletePurchase,
+    required this.onRefresh,
+  });
+
+  final List<ProduceOrder> purchases;
+  final List<ProduceReservation> reservations;
+  final Set<String> cancellingReservationIds;
+  final ValueChanged<ProduceReservation> onCancelReservation;
+  final Set<String> deletingPurchaseIds;
+  final ValueChanged<ProduceOrder> onDeletePurchase;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Orders (${purchases.length})',
+                style: const TextStyle(
+                  color: _deepForest,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Refresh purchases',
+              onPressed: onRefresh,
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
+        if (purchases.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Text('You have not placed any orders yet.'),
+          )
+        else
+          ...purchases.map(
+            (order) => Card(
+              color: _paper,
+              elevation: 0,
+              margin: const EdgeInsets.only(bottom: 10),
+              child: ListTile(
+                title: Text(
+                  order.items
+                      .map(
+                        (item) =>
+                            '${item.quantity} ${item.listing.unit} ${item.listing.name}',
+                      )
+                      .join(', '),
+                ),
+                subtitle: Text(
+                  'Vendor: ${order.items.map((item) => item.listing.vendor).toSet().join(', ')}'
+                  '\n${order.status} · ₱${order.total}',
+                ),
+                isThreeLine: true,
+                trailing: IconButton(
+                  tooltip: 'Remove purchase history',
+                  onPressed: deletingPurchaseIds.contains(order.id)
+                      ? null
+                      : () => onDeletePurchase(order),
+                  icon: const Icon(Icons.delete_outline),
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: 20),
+        Text(
+          'My reservations (${reservations.length})',
+          style: const TextStyle(
+            color: _deepForest,
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        if (reservations.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Text('You have no active reservations.'),
+          )
+        else
+          ...reservations.map(
+            (reservation) => Card(
+              color: _paper,
+              elevation: 0,
+              margin: const EdgeInsets.only(top: 10),
+              child: ListTile(
+                title: Text(
+                  '${reservation.quantity} ${reservation.listing.unit} ${reservation.listing.name}',
+                ),
+                subtitle: Text(
+                  'Vendor: ${reservation.listing.vendor} · ₱${reservation.total}',
+                ),
+                trailing: TextButton(
+                  onPressed: cancellingReservationIds.contains(reservation.id)
+                      ? null
+                      : () => onCancelReservation(reservation),
+                  child: Text(
+                    cancellingReservationIds.contains(reservation.id)
+                        ? 'Cancelling'
+                        : 'Cancel',
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -8073,7 +8280,7 @@ class _BuyerOnlyMessage extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.all(24),
         child: Text(
-          'The shopping cart is available to buyer accounts. Switch to a buyer account to continue.',
+          'Sign in with a buyer or vendor account to use the shopping cart.',
           textAlign: TextAlign.center,
           style: TextStyle(color: _muted, height: 1.5),
         ),

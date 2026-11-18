@@ -86,6 +86,73 @@ void main() {
     },
   );
 
+  test('vendors can manage a cart and order another vendor listing', () async {
+    final repository = InMemoryMarketplaceRepository();
+    addTearDown(repository.dispose);
+    final seller = await repository.register(
+      const MarketplaceCredentials(
+        email: 'vendor-seller@example.test',
+        password: 'local-password',
+        role: 'Vendor',
+      ),
+    );
+    const listing = ProduceListing(
+      id: 'vendor-purchase-listing',
+      name: 'Fresh Okra',
+      category: 'Vegetables',
+      price: 42,
+      unit: 'kg',
+      quantity: '5',
+      condition: 'Fresh',
+      vendor: 'Green Basket',
+      vendorInitials: 'GB',
+      location: 'Market Road',
+      imageUrl: '',
+      ownerUid: 'vendor-seller@example.test',
+    );
+    await repository.addListing(listing);
+    final purchaser = await repository.register(
+      const MarketplaceCredentials(
+        email: 'vendor-purchaser@example.test',
+        password: 'local-password',
+        role: 'Vendor',
+      ),
+    );
+
+    await repository.addToCart(listing: listing, quantity: 2);
+    expect((await repository.loadCart()).single.quantity, 2);
+    await repository.updateCartQuantity(listingId: listing.id, quantity: 1);
+    final order = await repository.checkoutCart();
+
+    expect(order.buyerEmail, purchaser.email);
+    expect(order.items.single.quantity, 1);
+    expect(await repository.loadCart(), isEmpty);
+    expect((await repository.loadOrders()).single.id, order.id);
+    final reservation = await repository.reserveListing(
+      listing: listing,
+      quantity: 1,
+    );
+    expect((await repository.loadReservations()).single.id, reservation.id);
+    expect(
+      await repository.cancelReservation(reservationId: reservation.id),
+      isTrue,
+    );
+    expect(await repository.loadReservations(), isEmpty);
+
+    await repository.signIn(
+      const MarketplaceCredentials(
+        email: 'vendor-seller@example.test',
+        password: 'local-password',
+        role: 'Vendor',
+      ),
+    );
+    await expectLater(
+      repository.addToCart(listing: listing, quantity: 1),
+      throwsA(isA<StateError>()),
+    );
+    expect(seller.id, listing.ownerUid);
+  });
+
   test('demo accounts and sample listings work without a server', () async {
     final repository = InMemoryMarketplaceRepository();
     addTearDown(repository.dispose);

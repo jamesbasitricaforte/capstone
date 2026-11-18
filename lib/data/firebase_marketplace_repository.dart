@@ -1967,6 +1967,15 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
       );
     }
     final account = _accountFromData(user, profile.data()!);
+    if (role == 'Buyer') {
+      if (account.role != 'Buyer' && account.role != 'Vendor') {
+        throw MarketplaceApiException(
+          'Only buyer and vendor accounts can use this feature.',
+          statusCode: 403,
+        );
+      }
+      return account;
+    }
     if (account.role != role) {
       throw MarketplaceApiException(
         'Only $role accounts can use this feature.',

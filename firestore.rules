@@ -13,12 +13,12 @@ service cloud.firestore {
           == 'Vendor';
     }
 
-    function isBuyer(userId) {
+    function isPurchaser(userId) {
       return signedIn()
         && request.auth.uid == userId
         && exists(/databases/$(database)/documents/users/$(userId))
         && get(/databases/$(database)/documents/users/$(userId)).data.role
-          == 'Buyer';
+          in ['Buyer', 'Vendor'];
     }
 
     function validHttpsUrl(value) {
@@ -190,7 +190,7 @@ service cloud.firestore {
       let transactionData = getAfter(transactionPath).data;
       let oldQuantity = int(resource.data.quantity);
       let newQuantity = int(request.resource.data.quantity);
-      return isBuyer(request.auth.uid)
+      return isPurchaser(request.auth.uid)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'quantity',
           'availability',
@@ -223,7 +223,7 @@ service cloud.firestore {
     ) {
       let oldQuantity = int(listingBefore.quantity);
       let newQuantity = int(listingAfter.quantity);
-      return isBuyer(buyerId)
+      return isPurchaser(buyerId)
         && reservationBefore.id == transactionId
         && reservationBefore.buyer_uid == buyerId
         && reservationBefore.listing_id == listingId
@@ -256,7 +256,7 @@ service cloud.firestore {
       reservationBefore,
       reservationAfter
     ) {
-      return isBuyer(buyerId)
+      return isPurchaser(buyerId)
         && reservationBefore.id == transactionId
         && reservationBefore.buyer_uid == buyerId
         && reservationBefore.listing_id is string
@@ -328,7 +328,7 @@ service cloud.firestore {
       let listingBefore = get(listingPath).data;
       let listingAfter = getAfter(listingPath).data;
       let data = request.resource.data;
-      return isBuyer(request.auth.uid)
+      return isPurchaser(request.auth.uid)
         && data.keys().hasAll([
           'id',
           'kind',
@@ -396,7 +396,7 @@ service cloud.firestore {
     function validVendorReview(reviewId) {
       let data = request.resource.data;
       let vendorPath = /databases/$(database)/documents/users/$(data.vendor_uid);
-      return isBuyer(request.auth.uid)
+      return isPurchaser(request.auth.uid)
         && data.keys().hasAll([
           'id',
           'vendor_uid',
@@ -598,9 +598,9 @@ service cloud.firestore {
               <= int(get(listingPath).data.quantity);
         }
 
-        allow read, delete: if isBuyer(userId);
-        allow create: if isBuyer(userId) && validCartItem();
-        allow update: if isBuyer(userId)
+        allow read, delete: if isPurchaser(userId);
+        allow create: if isPurchaser(userId) && validCartItem();
+        allow update: if isPurchaser(userId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'quantity',
             'updated_at'
@@ -709,7 +709,7 @@ service cloud.firestore {
           && request.resource.data.status == resource.data.status
         )
         || (
-          isBuyer(resource.data.buyer_uid)
+          isPurchaser(resource.data.buyer_uid)
           && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['buyer_hidden'])
           && request.resource.data.buyer_hidden == true
@@ -866,7 +866,7 @@ service cloud.firestore {
         let changedKeys = request.resource.data.diff(resource.data)
           .affectedKeys();
         return (
-            isBuyer(request.auth.uid)
+            isPurchaser(request.auth.uid)
             && resource.data.buyer_uid == request.auth.uid
             && changedKeys.hasOnly(['buyer_label'])
             && request.resource.data.buyer_label
@@ -897,7 +897,7 @@ service cloud.firestore {
         let changedKeys = request.resource.data.diff(resource.data)
           .affectedKeys();
         return (
-            isBuyer(request.auth.uid)
+            isPurchaser(request.auth.uid)
             && resource.data.buyer_uid == request.auth.uid
             && changedKeys.hasOnly([
               'buyer_photo_url',
