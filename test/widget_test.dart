@@ -553,6 +553,7 @@ void main() {
       find.text('Review your purchases and reservations.'),
       findsOneWidget,
     );
+    expect(find.byTooltip('Remove vendor transaction'), findsNothing);
     expect(find.text('No purchases yet.'), findsOneWidget);
 
     await tester.tap(find.text('Market'));
@@ -787,6 +788,7 @@ void main() {
     await tester.tap(find.widgetWithText(OutlinedButton, 'View transactions'));
     await tester.pumpAndSettle();
     expect(find.text('Orders (1)'), findsOneWidget);
+    expect(find.byTooltip('Remove vendor transaction'), findsOneWidget);
     expect(find.textContaining('Buyer: buyer@example.com'), findsOneWidget);
     expect(find.textContaining('Fresh Tomatoes'), findsWidgets);
     await tester.tap(find.byTooltip('Store dashboard'));
@@ -844,6 +846,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Create your account'), findsOneWidget);
+    expect(find.text('New here? Quick guide'), findsOneWidget);
+    expect(find.text('Browse the market'), findsOneWidget);
+    expect(find.text('Choose your account type'), findsOneWidget);
+    expect(find.text('Check listing details'), findsOneWidget);
     expect(find.text('For buyers'), findsOneWidget);
     expect(find.text('For vendors'), findsOneWidget);
     expect(
@@ -861,6 +867,10 @@ void main() {
     expect(
       tester.getCenter(find.text('For buyers')).dy,
       greaterThan(tester.getCenter(find.text('Create your account')).dy),
+    );
+    expect(
+      tester.getCenter(find.text('New here? Quick guide')).dy,
+      greaterThan(tester.getCenter(find.text('Sign in')).dy),
     );
     expect(find.byType(TextField), findsNothing);
     await registerBuyer(tester);

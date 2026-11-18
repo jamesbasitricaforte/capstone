@@ -214,6 +214,7 @@ abstract interface class MarketplaceRepository implements ReverseGeocoder {
   Future<List<ProduceOrder>> loadOrders();
   Future<bool> deleteBuyerOrder({required String orderId});
   Future<List<ProduceOrder>> loadVendorOrders();
+  Future<bool> hideVendorOrder({required String orderId});
   Future<bool> updateVendorOrder({
     required String orderId,
     required String status,
@@ -867,6 +868,13 @@ class InMemoryMarketplaceRepository implements MarketplaceRepository {
   @override
   Future<List<ProduceOrder>> loadVendorOrders() async =>
       _service.ordersForVendor(_requireVendor().email);
+
+  @override
+  Future<bool> hideVendorOrder({required String orderId}) async =>
+      _service.hideOrderForVendor(
+        orderId: orderId,
+        vendorEmail: _requireVendor().email,
+      );
 
   @override
   Future<bool> updateVendorOrder({

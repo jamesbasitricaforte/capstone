@@ -1011,13 +1011,34 @@ class FirebaseMarketplaceRepository extends InMemoryMarketplaceRepository {
         .get();
     final orders =
         snapshot.docs
-            .where((document) => document.data()['kind'] == 'order')
+            .where(
+              (document) =>
+                  document.data()['kind'] == 'order' &&
+                  document.data()['vendor_hidden'] != true,
+            )
             .map(_orderFromDocument)
             .toList()
           ..sort(
             (first, second) => second.createdAt.compareTo(first.createdAt),
           );
     return List.unmodifiable(orders);
+  }
+
+  @override
+  Future<bool> hideVendorOrder({required String orderId}) async {
+    final vendor = await _requireCommerceAccount('Vendor');
+    final orderReference = _marketplaceTransactions.doc(orderId);
+    return _firestore.runTransaction((transaction) async {
+      final orderDocument = await transaction.get(orderReference);
+      final data = orderDocument.data();
+      if (data == null ||
+          data['kind'] != 'order' ||
+          data['vendor_uid'] != vendor.id) {
+        return false;
+      }
+      transaction.update(orderReference, {'vendor_hidden': true});
+      return true;
+    });
   }
 
   @override

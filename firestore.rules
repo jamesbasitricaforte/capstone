@@ -701,6 +701,14 @@ service cloud.firestore {
           )
         )
         || (
+          isVendor(resource.data.vendor_uid)
+          && resource.data.kind == 'order'
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['vendor_hidden'])
+          && request.resource.data.vendor_hidden == true
+          && request.resource.data.status == resource.data.status
+        )
+        || (
           isBuyer(resource.data.buyer_uid)
           && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['buyer_hidden'])

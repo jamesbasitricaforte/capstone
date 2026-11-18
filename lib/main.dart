@@ -193,6 +193,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
   List<ProduceOrder> _orders = [];
   final Set<String> _deletingBuyerOrderIds = {};
   List<ProduceOrder> _vendorOrders = [];
+  final Set<String> _removingVendorOrderIds = {};
   List<MarketplaceConversation> _conversations = [];
   final Map<String, DateTime> _readConversationUpdatedAt = {};
   final Set<String> _deletingConversationIds = {};
@@ -863,6 +864,59 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     } finally {
       if (mounted) {
         setState(() => _deletingBuyerOrderIds.remove(order.id));
+      }
+    }
+  }
+
+  Future<void> _removeVendorOrder(ProduceOrder order) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remove this transaction?'),
+        content: const Text(
+          'This removes the transaction from your vendor list only. The buyer’s order will remain in their transaction history.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Keep transaction'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Remove transaction'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _removingVendorOrderIds.add(order.id));
+    try {
+      final removed = await _service.hideVendorOrder(orderId: order.id);
+      if (!mounted) return;
+      if (!removed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This transaction is no longer available.'),
+          ),
+        );
+        return;
+      }
+      await _loadVendorOrders();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Transaction removed from your vendor list.'),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not remove transaction: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _removingVendorOrderIds.remove(order.id));
       }
     }
   }
@@ -2368,6 +2422,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         isLoadingVendorOrders: _isLoadingVendorOrders,
         vendorOrdersError: _vendorOrdersError,
         onRefreshVendorOrders: _loadVendorOrders,
+        removingVendorOrderIds: _removingVendorOrderIds,
+        onRemoveVendorOrder: _removeVendorOrder,
         onUpdateVendorOrder: _updateVendorOrder,
         vendorAccount: _signedInVendorAccount,
         ownListings: _listings
@@ -6762,6 +6818,8 @@ class _TransactionPage extends StatelessWidget {
     required this.isLoadingVendorOrders,
     required this.vendorOrdersError,
     required this.onRefreshVendorOrders,
+    required this.removingVendorOrderIds,
+    required this.onRemoveVendorOrder,
     required this.onUpdateVendorOrder,
     required this.vendorAccount,
     required this.ownListings,
@@ -6790,6 +6848,8 @@ class _TransactionPage extends StatelessWidget {
   final bool isLoadingVendorOrders;
   final Object? vendorOrdersError;
   final VoidCallback onRefreshVendorOrders;
+  final Set<String> removingVendorOrderIds;
+  final Future<void> Function(ProduceOrder) onRemoveVendorOrder;
   final Future<void> Function(ProduceOrder, String) onUpdateVendorOrder;
   final MarketplaceAccount? vendorAccount;
   final List<ProduceListing> ownListings;
@@ -6810,6 +6870,8 @@ class _TransactionPage extends StatelessWidget {
         isLoadingVendorOrders: isLoadingVendorOrders,
         vendorOrdersError: vendorOrdersError,
         onRefreshVendorOrders: onRefreshVendorOrders,
+        removingVendorOrderIds: removingVendorOrderIds,
+        onRemoveVendorOrder: onRemoveVendorOrder,
         onMessageOrderParticipant: onMessageOrderParticipant,
         onUpdateVendorOrder: onUpdateVendorOrder,
         vendorAccount: vendorAccount,
@@ -7034,6 +7096,8 @@ class _VendorTransactionsPage extends StatefulWidget {
     required this.isLoadingVendorOrders,
     required this.vendorOrdersError,
     required this.onRefreshVendorOrders,
+    required this.removingVendorOrderIds,
+    required this.onRemoveVendorOrder,
     required this.onMessageOrderParticipant,
     required this.onUpdateVendorOrder,
     required this.vendorAccount,
@@ -7052,6 +7116,8 @@ class _VendorTransactionsPage extends StatefulWidget {
   final bool isLoadingVendorOrders;
   final Object? vendorOrdersError;
   final VoidCallback onRefreshVendorOrders;
+  final Set<String> removingVendorOrderIds;
+  final Future<void> Function(ProduceOrder) onRemoveVendorOrder;
   final Future<void> Function(ProduceOrder, MarketplaceCartItem)
   onMessageOrderParticipant;
   final Future<void> Function(ProduceOrder, String) onUpdateVendorOrder;
@@ -7130,6 +7196,8 @@ class _VendorTransactionsPageState extends State<_VendorTransactionsPage> {
                       isLoading: widget.isLoadingVendorOrders,
                       error: widget.vendorOrdersError,
                       onRefresh: widget.onRefreshVendorOrders,
+                      removingOrderIds: widget.removingVendorOrderIds,
+                      onRemoveOrder: widget.onRemoveVendorOrder,
                       onMessageOrderParticipant:
                           widget.onMessageOrderParticipant,
                       onUpdateVendorOrder: widget.onUpdateVendorOrder,
@@ -7148,6 +7216,8 @@ class _VendorOrdersContent extends StatelessWidget {
     required this.isLoading,
     required this.error,
     required this.onRefresh,
+    required this.removingOrderIds,
+    required this.onRemoveOrder,
     required this.onMessageOrderParticipant,
     required this.onUpdateVendorOrder,
   });
@@ -7156,6 +7226,8 @@ class _VendorOrdersContent extends StatelessWidget {
   final bool isLoading;
   final Object? error;
   final VoidCallback onRefresh;
+  final Set<String> removingOrderIds;
+  final Future<void> Function(ProduceOrder) onRemoveOrder;
   final Future<void> Function(ProduceOrder, MarketplaceCartItem)
   onMessageOrderParticipant;
   final Future<void> Function(ProduceOrder, String) onUpdateVendorOrder;
@@ -7239,6 +7311,24 @@ class _VendorOrdersContent extends StatelessWidget {
                         '${order.status} · ${order.createdAt.toLocal().toString().split('.').first}',
                       ),
                       isThreeLine: true,
+                      trailing: IconButton(
+                        tooltip: 'Remove vendor transaction',
+                        onPressed: removingOrderIds.contains(order.id)
+                            ? null
+                            : () => onRemoveOrder(order),
+                        icon: removingOrderIds.contains(order.id)
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.delete_outline,
+                                color: Color(0xFF9D4038),
+                              ),
+                      ),
                     ),
                     Wrap(
                       spacing: 8,
@@ -7535,6 +7625,72 @@ class _WelcomeBenefit extends StatelessWidget {
   }
 }
 
+class _WelcomeGuideStep extends StatelessWidget {
+  const _WelcomeGuideStep({
+    required this.number,
+    required this.title,
+    required this.description,
+  });
+
+  final String number;
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 24,
+            height: 24,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              color: Color(0xFFE9EFE5),
+              shape: BoxShape.circle,
+            ),
+            child: Text(
+              number,
+              style: const TextStyle(
+                color: _forest,
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: _deepForest,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  description,
+                  style: const TextStyle(
+                    color: _muted,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _GuestAccessPage extends StatelessWidget {
   const _GuestAccessPage({
     required this.onCreateAccount,
@@ -7715,6 +7871,48 @@ class _GuestAccessPage extends StatelessWidget {
                                             ),
                                             onPressed: onSignIn,
                                             child: const Text('Sign in'),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 16),
+                                        Container(
+                                          width: double.infinity,
+                                          padding: const EdgeInsets.all(14),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFF4F6F0),
+                                            borderRadius: BorderRadius.circular(
+                                              14,
+                                            ),
+                                            border: Border.all(color: _line),
+                                          ),
+                                          child: const Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                'New here? Quick guide',
+                                                style: TextStyle(
+                                                  color: _deepForest,
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w800,
+                                                ),
+                                              ),
+                                              _WelcomeGuideStep(
+                                                number: '1',
+                                                title: 'Browse the market',
+                                                description: 'Choose “Browse as guest” to explore local produce and vendors.',
+                                              ),
+                                              _WelcomeGuideStep(
+                                                number: '2',
+                                                title:
+                                                    'Choose your account type',
+                                                description: 'Create a Buyer account to shop or a Vendor account to post produce.',
+                                              ),
+                                              _WelcomeGuideStep(
+                                                number: '3',
+                                                title: 'Check listing details',
+                                                description: 'Review prices and availability, and contact vendors if you have questions.',
+                                              ),
+                                            ],
                                           ),
                                         ),
                                       ],

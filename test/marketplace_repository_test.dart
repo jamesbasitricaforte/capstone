@@ -768,6 +768,65 @@ void main() {
   );
 
   test(
+    'vendors can hide their transaction without removing the buyer order',
+    () async {
+      final repository = InMemoryMarketplaceRepository();
+      addTearDown(repository.dispose);
+      await repository.register(
+        const MarketplaceCredentials(
+          email: 'vendor-hide@example.test',
+          password: 'local-password',
+          role: 'Vendor',
+        ),
+      );
+      const listing = ProduceListing(
+        id: 'vendor-hide-listing',
+        name: 'Fresh Tomatoes',
+        category: 'Vegetables',
+        price: 40,
+        unit: 'kg',
+        quantity: '5',
+        condition: 'Fresh',
+        vendor: 'Green Basket',
+        vendorInitials: 'GB',
+        location: 'Market Road',
+        imageUrl: '',
+        ownerEmail: 'vendor-hide@example.test',
+      );
+      await repository.addListing(listing);
+      await repository.register(
+        const MarketplaceCredentials(
+          email: 'buyer-vendor-hide@example.test',
+          password: 'local-password',
+          role: 'Buyer',
+        ),
+      );
+      final order = await repository.buyListing(listing: listing, quantity: 1);
+      await repository.signIn(
+        const MarketplaceCredentials(
+          email: 'vendor-hide@example.test',
+          password: 'local-password',
+          role: 'Vendor',
+        ),
+      );
+
+      expect(await repository.loadVendorOrders(), hasLength(1));
+      expect(await repository.hideVendorOrder(orderId: order.id), isTrue);
+      expect(await repository.loadVendorOrders(), isEmpty);
+      expect(await repository.hideVendorOrder(orderId: order.id), isFalse);
+
+      await repository.signIn(
+        const MarketplaceCredentials(
+          email: 'buyer-vendor-hide@example.test',
+          password: 'local-password',
+          role: 'Buyer',
+        ),
+      );
+      expect(await repository.loadOrders(), hasLength(1));
+    },
+  );
+
+  test(
     'vendors can decline an order and restore the available stock',
     () async {
       final vendor = InMemoryMarketplaceRepository();

@@ -192,6 +192,7 @@ class MarketplaceService {
   static final List<ProduceReservation> _reservations = [];
   static final List<ProduceOrder> _orders = [];
   static final Set<String> _hiddenBuyerOrders = {};
+  static final Set<String> _hiddenVendorOrders = {};
   static final Map<String, String> _vendorOrderStatuses = {};
   static final Map<String, MarketplaceConversation> _conversations = {};
   static final Map<String, StreamController<List<MarketplaceConversation>>>
@@ -665,6 +666,26 @@ class MarketplaceService {
   String _buyerOrderKey(String buyerEmail, String orderId) =>
       '${buyerEmail.toLowerCase()}:$orderId';
 
+  bool hideOrderForVendor({
+    required String orderId,
+    required String vendorEmail,
+  }) {
+    final ownsOrder = _orders.any(
+      (order) =>
+          order.id == orderId &&
+          order.items.any(
+            (item) =>
+                item.listing.ownerEmail?.toLowerCase() ==
+                vendorEmail.toLowerCase(),
+          ),
+    );
+    if (!ownsOrder) return false;
+    return _hiddenVendorOrders.add(_vendorOrderKey(vendorEmail, orderId));
+  }
+
+  String _vendorOrderKey(String vendorEmail, String orderId) =>
+      '${vendorEmail.toLowerCase()}:$orderId';
+
   bool updateOrderStatus({
     required String orderId,
     required String vendorEmail,
@@ -963,7 +984,12 @@ class MarketplaceService {
       final vendorItems = order.items
           .where((item) => item.listing.ownerEmail == vendorEmail)
           .toList();
-      if (vendorItems.isEmpty) continue;
+      if (vendorItems.isEmpty ||
+          _hiddenVendorOrders.contains(
+            _vendorOrderKey(vendorEmail, order.id),
+          )) {
+        continue;
+      }
 
       vendorOrders.add(
         ProduceOrder(
