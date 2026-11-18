@@ -2000,11 +2000,11 @@ void main() {
 
     final savedListings = await service.loadListings();
     final publicListings = await service.loadPublicListings();
-    final Notification = await service.loadNotifications();
+    final notifications = await service.loadNotifications();
     expect(savedListings.first.imageBytes, listing.imageBytes);
     expect(savedListings.first.imageFileName, 'squash.png');
     expect(publicListings.first.ownerEmail, isNull);
-    expect(Notification.first.listing!.id, listing.id);
+    expect(notifications.first.listing!.id, listing.id);
   });
 
   test('reserving and buying produce decrement available inventory', () async {

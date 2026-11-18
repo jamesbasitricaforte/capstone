@@ -145,7 +145,7 @@ enum _Section {
   nearby,
   cart,
   messages,
-  Notification,
+  notifications,
   transactions,
   market,
   profile,
@@ -665,7 +665,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
       final action = switch (section) {
         _Section.cart => 'open your cart',
         _Section.messages => 'view your messages',
-        _Section.Notification => 'view your Notification',
+        _Section.notifications => 'view your Notification',
         _Section.transactions => 'view your transactions',
         _Section.profile => 'open your account',
         _ => 'continue',
@@ -683,7 +683,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
     if (section == _Section.messages) {
       await _loadConversations();
     }
-    if (section == _Section.Notification && _signedInRole != null) {
+    if (section == _Section.notifications && _signedInRole != null) {
       final notificationUserId = _signedInUserId;
       try {
         final notifications = await _service.loadNotifications();
@@ -2281,7 +2281,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
                 (sum, item) => sum + item.quantity,
               ),
               onOpenCart: () => _setSection(_Section.cart),
-              onOpenNotification: () => _setSection(_Section.Notification),
+              onOpenNotification: () => _setSection(_Section.notifications),
               onOpenMarket: () => _setSection(_Section.market),
               onPostProduce: _showNewListingForm,
               onSignIn: _signedInRole == null
@@ -2353,7 +2353,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         selectedIcon: Icon(Icons.storefront),
         label: 'Market',
       ),
-      _Section.Notification => NavigationDestination(
+      _Section.notifications => NavigationDestination(
         icon: Badge(
           isLabelVisible: _unreadNotificationCount > 0,
           label: Text('$_unreadNotificationCount'),
@@ -2381,7 +2381,7 @@ class _MarketplaceScreenState extends State<MarketplaceScreen>
         }),
       );
     }
-    if (_section == _Section.Notification) {
+    if (_section == _Section.notifications) {
       return _NotificationPage(
         notifications: _notifications,
         onOpenNotification: (notification) {
